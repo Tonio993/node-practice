@@ -22,7 +22,7 @@ export async function initDb(): Promise<void> {
     if (!await db.schema.withSchema('concept_configuration').hasTable('concept')) {
         await db.schema.withSchema('concept_configuration').createTable('concept', (t) => {
             t.increments('id').notNullable()
-            t.string('name').notNullable()
+            t.string('name').unique().notNullable()
             t.timestamps(true, true) // created_at, updated_at
         })
     }
@@ -35,11 +35,11 @@ export async function initDb(): Promise<void> {
             t.foreign('id_concept').references('id').inTable('concept_configuration.concept')
             t.string('name').notNullable()
             t.string('type').notNullable()
-            t.timestamps(true, true) // created_at, updated_at
+            t.timestamps(true, true)
+
+            t.unique(['id_concept', 'name'])
         })
     }
-    
-
 
     console.log('DB inizializzato')
 }

@@ -1,5 +1,5 @@
 {
-  "name": "gestionale",
+  "name": "nodejs_practics",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
@@ -10,12 +10,16 @@
   "dependencies": {
     "@electric-sql/pglite": "^0.4.5",
     "better-sqlite3": "^11.0.0",
+    "express": "^5.2.1",
+    "fast-glob": "^3.3.3",
     "knex": "^3.2.10",
     "knex-pglite": "^0.14.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
-    "@types/node": "^20.0.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^20.19.41",
+    "ts-node": "^10.9.2",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0",
     "vitest": "^2.0.0"

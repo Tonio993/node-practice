@@ -1,32 +1,42 @@
-import { initDb } from './db/knex'
-import { FatturaRepository } from './repositories/fattura.repository'
+import  express, { Request, Response } from 'express'
+import fg from 'fast-glob'
+import path from 'path'
+import { pathToFileURL } from 'url';
  
-async function main() {
-  // Inizializza DB e crea tabelle se non esistono
-  await initDb()
- 
-  const repo = new FatturaRepository()
- 
-  // INSERT
-  const id = await repo.insert({
-    numero: '001',
-    data_ora: new Date().toISOString(),
-    nave: 'Diciannove',
-    stato: 'APERTA'
-  })
-  console.log(`Fattura inserita con id: ${id}`)
- 
-  // SELECT per stato
-  const aperte = await repo.findByStato('APERTA')
-  console.log('Fatture aperte:', aperte)
- 
-  // UPDATE
-  await repo.updateStato(id, 'PAGATA')
-  console.log(`Fattura ${id} aggiornata a PAGATA`)
- 
-  // Verifica
-  const fattura = await repo.findById(id)
-  console.log('Fattura aggiornata:', fattura)
+const app = express();
+const PORT = 3000;
+
+app.use(express.json())
+
+async function loadModules() {
+  const isProduction = process.env.NODE_ENV === 'production'
+  const pattern = isProduction ? 'dist/modules/**/*.module.js' : 'src/modules/**/*.module.ts'
+
+  const root = process.cwd()
+  const files = await fg(pattern)
+  
+  for (const file of files) {
+    const filePath = path.join(root, file)
+
+    const moduleImport = await import(
+      pathToFileURL(filePath).href
+    )
+
+    const module = moduleImport.default
+
+    if (module.route) {
+      app.use(`/api${module.route.path}`, module.route.router)
+      console.log(`Loaded module: ${module.route.path}`)
+    }
+  }
 }
- 
-main().catch(console.error)
+
+async function bootstrap() {
+  await loadModules()
+
+  app.listen(PORT, () => {
+    console.log('Server started')
+  })
+}
+
+bootstrap()
