@@ -13,10 +13,11 @@ export class GenericEntityFactory<T extends BaseEntity> {
     constructor(
         private readonly knex: Knex,
         private readonly tableName: string,
-        private readonly tableSchema: string
+        private readonly tableSchema: string,
+        private readonly entityClass?: Function
     ) {
 
-        const repo = new GenericEntityRepository<T>(this.knex, this.tableName, this.tableSchema)
+        const repo = new GenericEntityRepository<T>(this.knex, this.tableName, this.tableSchema, this.entityClass)
         const service = new GenericEntityService<T>(repo)
         const controller = new GenericEntityController<T>(service)
         const routes = new GenericEntityRoutes<T>(controller)

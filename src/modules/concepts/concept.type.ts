@@ -1,22 +1,17 @@
-export interface ConceptEntity {
-    id: number
-    name: string
+import { OneToMany } from "../../shared/generic-entity/generic-entity.decorator"
+import { BaseEntity } from "../../shared/generic-entity/generic-entity.type"
+
+export class Concept implements BaseEntity {
+    id?: number
+    name!: string
+
+    @OneToMany('concept_field', 'id_concept')
+    fields?: ConceptField[]
 }
 
-export interface ConceptFieldEntity {
-    id: number
-    idConcept: number
-    name: string
-    type: string
-}
-
-export interface Concept {
-    id: number
-    name: string
-    fields: [{
-        id: number
-        idConcept: number
-        name: string
-        type: string
-    }]
+export class ConceptField implements BaseEntity {
+    id?: number
+    conceptId!: number
+    name!: string
+    type!: string
 }
