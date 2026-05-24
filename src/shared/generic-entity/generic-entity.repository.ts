@@ -1,7 +1,7 @@
 import { Knex } from 'knex'
-import { BaseEntity } from './generic-entity.type'
 import { getRelations, RelationMetadata } from './generic-entity.decorator'
 import { repositoryRegistry } from './generic-entity.registry'
+import { BaseEntity } from './generic-entity.type'
 
 export class GenericEntityRepository<T extends BaseEntity> {
     protected relations: RelationMetadata[]
@@ -13,39 +13,41 @@ export class GenericEntityRepository<T extends BaseEntity> {
         private readonly entityClass?: Function
     ) {
         this.relations = entityClass ? getRelations(entityClass) : []
-        console.log(this.relations)
+        repositoryRegistry.register(tableName, this)
     }
 
     async findAll(): Promise<T[]> {
         const result = await this.knex(this.tableName)
             .withSchema(this.tableSchema)
 
-        return Promise.all(result.map(i => this.loadChildren(i)))
+        return Promise.all(result.map(i => this.selectChildren(i)))
     }
-    
-    async findById(id: number): Promise<T> {
+
+    async findById(id: number): Promise<T | undefined> {
         const result = await this.knex(this.tableName)
             .withSchema(this.tableSchema)
             .where({ id })
             .first()
-        
-        return this.loadChildren(result)
+
+        return result ? this.selectChildren(result) : undefined
     }
 
     async findByExample(filters: Partial<T>): Promise<T[]> {
         const result = await this.knex(this.tableName)
             .withSchema(this.tableSchema)
             .where(filters as object)
-        
-        return Promise.all(result.map(i => this.loadChildren(i)))
+
+        return Promise.all(result.map(i => this.selectChildren(i)))
     }
 
-    insert(entity: Omit<T, 'id'>): Promise<T> {
-        return this.knex(this.tableName)
+    async insert(entity: Omit<T, 'id'>): Promise<T> {
+        const [{ id }]: { id: number }[] = await this.knex(this.tableName)
             .withSchema(this.tableSchema)
-            .insert(entity)
-            .returning('*')
-            .then((res: T[]) => res[0])
+            .insert(this.omit(entity, this.relations.map(r => r.propertyKey)))
+            .returning('id')
+
+        await this.insertChildren(entity, id)
+        return await this.findById(id) as T
 
     }
 
@@ -58,19 +60,22 @@ export class GenericEntityRepository<T extends BaseEntity> {
             .then((res: T[]) => res[0])
     }
 
-    delete(id: number): Promise<T> {
-        return this.knex(this.tableName)
+    async delete(id: number): Promise<boolean> {
+        await this.deleteChildren(id)
+
+        const result: { affectedRows: number } = await this.knex(this.tableName)
             .withSchema(this.tableSchema)
             .where({ id })
-            .delete('*')
-            .then((res: T[]) => res[0])
+            .delete();
+
+        return result.affectedRows > 0
     }
 
 
-    private async loadChildren(item: T): Promise<T> {
+    private async selectChildren(item: T): Promise<T> {
         if (this.relations.length === 0) return item
 
-        const result = { ...item } as Record<string, unknown>
+        const result: any = { ...item }
 
         for (const rel of this.relations) {
             const childRepo = repositoryRegistry.get(rel.targetTable)!
@@ -82,17 +87,36 @@ export class GenericEntityRepository<T extends BaseEntity> {
         return result as T
     }
 
-    private async persistChildren(item: T): Promise<void> {
+    private async insertChildren(item: Omit<T, 'id'>, id: number): Promise<void> {
         if (this.relations.length === 0) return
 
         for (const rel of this.relations) {
             const childRepo = repositoryRegistry.get(rel.targetTable)!
 
-            const children = await childRepo.findByExample(
-                { [rel.foreignKey]: item.id } as any
-            )
-            
-
+            if (!item[rel.propertyKey]) continue
+            for await (const child of item[rel.propertyKey] as Array<any>) {
+                await childRepo.insert({...child, [rel.foreignKey]: id})
+            }
         }
+    }
+
+    private async deleteChildren(id: number): Promise<void> {
+        if (this.relations.length === 0) return
+
+        for (const rel of this.relations) {
+            const childRepo = repositoryRegistry.get(rel.targetTable)!
+
+            const children = await childRepo.findByExample({ [rel.foreignKey]: id })
+
+            for (const child of children) {
+                await childRepo.delete(child.id!)
+            }
+        }
+    }
+
+    private omit<T extends object>(obj: T, keys: string[]): Partial<T> {
+        const result = { ...obj };
+        keys.forEach(key => delete (result as any)[key]);
+        return result;
     }
 }

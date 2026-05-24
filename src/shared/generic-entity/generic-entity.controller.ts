@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
-import { BaseEntity } from "./generic-entity.type";
 import { GenericEntityService } from "./generic-entity.service";
+import { BaseEntity } from "./generic-entity.type";
 
 export class GenericEntityController<T extends BaseEntity> {
 
@@ -46,10 +46,10 @@ export class GenericEntityController<T extends BaseEntity> {
     delete = async (req: Request, res: Response): Promise<void> => {
         const id = Number(req.params.id)
 
-        const result = await this.service.delete(id)
+        const deleted = await this.service.delete(id)
 
-        result ?
-        res.json(result) :
+        deleted ?
+        res.status(200).end() :
         res.status(404).json({error: `Entity with id ${id} not found`})
     }
 

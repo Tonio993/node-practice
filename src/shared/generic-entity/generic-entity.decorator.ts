@@ -1,4 +1,3 @@
-import { it } from 'node:test'
 import 'reflect-metadata'
 
 const RELATIONS_KEY = 'entity:relations'

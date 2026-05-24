@@ -1,3 +1,4 @@
 export interface BaseEntity {
-    id?: number
+    id?: number,
+    [key: string]: any
 }

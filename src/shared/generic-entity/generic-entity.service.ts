@@ -20,7 +20,7 @@ export class GenericEntityService<T extends BaseEntity> {
     return this.repo.update(id, entity)
   }
 
-  delete(id: number): Promise<T> {
+  delete(id: number): Promise<boolean> {
     return this.repo.delete(id)
   }
 }

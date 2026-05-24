@@ -24,7 +24,7 @@ export class GenericEntityFactory<T extends BaseEntity> {
 
         this.moduleDefinition = {
             route: {
-                path: '/concept',
+                path: `/${this.tableName}`,
                 router: routes.router
             }
         }
