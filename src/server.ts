@@ -1,7 +1,8 @@
-import  express, { Request, Response } from 'express'
-import fg from 'fast-glob'
-import path from 'path'
+import express from 'express';
+import fg from 'fast-glob';
+import path from 'path';
 import { pathToFileURL } from 'url';
+import { initDb } from './db/knex';
  
 const app = express();
 const PORT = 3000;
@@ -29,6 +30,8 @@ async function loadModules() {
       console.log(`Loaded module: ${module.route.path}`)
     }
   }
+
+  await initDb()
 }
 
 async function bootstrap() {
