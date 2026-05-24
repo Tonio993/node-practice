@@ -2,10 +2,21 @@ import 'reflect-metadata'
 
 const RELATIONS_KEY = 'entity:relations'
 
+export interface EntityMetadata {
+  tableName: string
+  tableSchema?: string
+}
+
 export interface RelationMetadata {
   propertyKey: string
   targetTable: string
   foreignKey: string
+}
+
+export function Entity(entityMetadata?: EntityMetadata) {
+  return function (constructor: Function) {
+    Reflect.defineMetadata('entity', entityMetadata || {}, constructor)
+  }
 }
 
 export function OneToMany(targetTable: string, foreignKey: string) {
@@ -19,6 +30,10 @@ export function OneToMany(targetTable: string, foreignKey: string) {
       target.constructor
     )
   }
+}
+
+export function getEntityMetadata(target: Function): EntityMetadata {
+  return Reflect.getMetadata('entity', target)
 }
 
 export function getRelations(target: Function): RelationMetadata[] {

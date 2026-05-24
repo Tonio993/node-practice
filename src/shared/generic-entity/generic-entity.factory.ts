@@ -1,5 +1,6 @@
 import { Knex } from "knex"
 import { ModuleDefinition } from "../types/module-definition"
+import { toCamelCase } from "../utils/case.util"
 import { GenericEntityController } from "./generic-entity.controller"
 import { GenericEntityRepository } from "./generic-entity.repository"
 import { GenericEntityRoutes } from "./generic-entity.router"
@@ -12,19 +13,18 @@ export class GenericEntityFactory<T extends BaseEntity> {
 
     constructor(
         private readonly knex: Knex,
-        private readonly tableName: string,
-        private readonly tableSchema: string,
-        private readonly entityClass?: Function
+        private readonly entityClass: Function,
+        private readonly path?: string
     ) {
 
-        const repo = new GenericEntityRepository<T>(this.knex, this.tableName, this.tableSchema, this.entityClass)
+        const repo = new GenericEntityRepository<T>(this.knex, this.entityClass)
         const service = new GenericEntityService<T>(repo)
         const controller = new GenericEntityController<T>(service)
         const routes = new GenericEntityRoutes<T>(controller)
 
         this.moduleDefinition = {
             route: {
-                path: `/${this.tableName}`,
+                path: `/${this.path || toCamelCase(repo.tableName)}`,
                 router: routes.router
             }
         }

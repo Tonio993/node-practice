@@ -1,6 +1,7 @@
-import { OneToMany } from "../../shared/generic-entity/generic-entity.decorator"
+import { Entity, OneToMany } from "../../shared/generic-entity/generic-entity.decorator"
 import { BaseEntity } from "../../shared/generic-entity/generic-entity.type"
 
+@Entity({tableName: 'concept', tableSchema: 'concept_configuration'})
 export class Concept implements BaseEntity {
     id?: number
     name!: string
@@ -9,6 +10,7 @@ export class Concept implements BaseEntity {
     fields?: ConceptField[]
 }
 
+@Entity({tableName: 'concept_field', tableSchema: 'concept_configuration'})
 export class ConceptField implements BaseEntity {
     id?: number
     conceptId!: number
