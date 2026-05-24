@@ -21,7 +21,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
     constructor(
         protected readonly knex: Knex,
-        private readonly entityClass: Function
+        entityClass: Function
     ) {
         const entityMetadata = getEntityMetadata(entityClass)
 
@@ -35,20 +35,8 @@ export class GenericEntityRepository<T extends BaseEntity> {
         repositoryRegistry.register(this.tableName, this)
     }
 
-    private baseQuery(trx?: Knex.Transaction) {
-        let baseQuery = trx ? trx(this.tableName) : this.knex(this.tableName);
-        if (this.tableSchema) {
-            baseQuery = baseQuery.withSchema(this.tableSchema)
-        }
-        return baseQuery
-    }
 
-    private async getTransaction<R>(trx: Knex.Transaction | undefined, callback: (trx: Knex.Transaction) => Promise<R>): Promise<R> {
-        if (trx) {
-            return callback(trx)
-        }
-        return this.knex.transaction(callback)
-    }
+    // SELECT
 
     async findAll(trx?: Knex.Transaction): Promise<T[]> {
         const result = await this.baseQuery(trx)
@@ -79,52 +67,6 @@ export class GenericEntityRepository<T extends BaseEntity> {
         return Promise.all(result.map(i => this.selectChildren(i, trx)))
     }
 
-    async insert(entity: Omit<T, 'id'>, trx?: Knex.Transaction): Promise<T> {
-        let result: T
-
-        await this.getTransaction(trx, async (transaction) => {
-            const [{ id }]: { id: number }[] = await this.baseQuery(transaction)
-                .insert(omit(entity, this.relations.map(r => r.propertyKey)))
-                .returning('id')
-    
-            await this.insertChildren(entity, id, transaction)
-            result = await this.findById(id, transaction) as T
-        })
-
-        return result!
-    }
-
-    async update(id: number, concept: Partial<Omit<T, 'id'>>, trx?: Knex.Transaction): Promise<T> {
-        let result: T
-
-        await this.getTransaction(trx, async (transaction) => {
-            result = await this.baseQuery(transaction)
-                .update({ ...concept, id, updated_at: new Date() })
-                .where({ id })
-                .returning('*')
-                .then((res: T[]) => res[0])
-        })
-
-        return result!
-    }
-
-    async delete(id: number, trx?: Knex.Transaction): Promise<boolean> {
-        let affectedRows = 0
-
-        await this.getTransaction(trx, async (transaction) => {
-            await this.deleteChildren(id, transaction)
-    
-            const result: { affectedRows: number } = await this.baseQuery(transaction)
-                .where({ id })
-                .delete();
-    
-            affectedRows = result.affectedRows
-            })
-
-        return affectedRows > 0
-    }
-
-
     private async selectChildren(item: T, trx?: Knex.Transaction): Promise<T> {
         if (this.relations.length === 0) return item
         
@@ -144,6 +86,23 @@ export class GenericEntityRepository<T extends BaseEntity> {
         return result as T
     }
 
+    // INSERT
+
+    async insert(entity: Omit<T, 'id'>, trx?: Knex.Transaction): Promise<T> {
+        let result: T
+
+        await this.getTransaction(trx, async (transaction) => {
+            const [{ id }]: { id: number }[] = await this.baseQuery(transaction)
+                .insert(omit(entity, this.relations.map(r => r.propertyKey)))
+                .returning('id')
+    
+            await this.insertChildren(entity, id, transaction)
+            result = await this.findById(id, transaction) as T
+        })
+
+        return result!
+    }
+
     private async insertChildren(item: Omit<T, 'id'>, id: number, trx?: Knex.Transaction): Promise<void> {
         if (this.relations.length === 0) return
 
@@ -158,6 +117,63 @@ export class GenericEntityRepository<T extends BaseEntity> {
             }
         })
 
+    }
+
+
+    // UPDATE
+
+    async update(id: number, entity: Partial<Omit<T, 'id'>>, trx?: Knex.Transaction): Promise<T> {
+        let result: T
+
+        await this.getTransaction(trx, async (transaction) => {
+            result = await this.baseQuery(transaction)
+                .update({ ...omit(entity, this.relations.map(r => r.propertyKey)), id, updated_at: new Date() })
+                .where({ id })
+                .returning('*')
+                .then((res: T[]) => res[0])
+        })
+
+        // TODO: update children
+
+        return result!
+    }
+
+    private async updateChildren(id: number, item: Partial<T>, trx?: Knex.Transaction): Promise<void> {
+        if (this.relations.length === 0) return
+
+        
+        await this.getTransaction(trx, async (transaction) => {
+            const existing = await this.findById(id, transaction)
+            
+            for (const rel of this.relations) {
+                const childRepo = repositoryRegistry.get(rel.targetTable)!
+
+                const existingChildren = existing![rel.propertyKey].map((c: T) => c.id) || []
+
+                if (!item[rel.propertyKey]) continue
+                const toInsert = item[rel.propertyKey]!.filter((child: T) => child.id === undefined)
+                // TODO
+            }
+        })
+    }
+
+
+    // DELETE
+
+    async delete(id: number, trx?: Knex.Transaction): Promise<boolean> {
+        let affectedRows = 0
+
+        await this.getTransaction(trx, async (transaction) => {
+            await this.deleteChildren(id, transaction)
+    
+            const result: { affectedRows: number } = await this.baseQuery(transaction)
+                .where({ id })
+                .delete();
+    
+            affectedRows = result.affectedRows
+            })
+
+        return affectedRows > 0
     }
 
     private async deleteChildren(id: number, trx?: Knex.Transaction): Promise<void> {
@@ -175,6 +191,21 @@ export class GenericEntityRepository<T extends BaseEntity> {
             }
         })
 
+    }
+
+    private baseQuery(trx?: Knex.Transaction) {
+        let baseQuery = trx ? trx(this.tableName) : this.knex(this.tableName);
+        if (this.tableSchema) {
+            baseQuery = baseQuery.withSchema(this.tableSchema)
+        }
+        return baseQuery
+    }
+
+    private async getTransaction<R>(trx: Knex.Transaction | undefined, callback: (trx: Knex.Transaction) => Promise<R>): Promise<R> {
+        if (trx) {
+            return callback(trx)
+        }
+        return this.knex.transaction(callback)
     }
 
 }
