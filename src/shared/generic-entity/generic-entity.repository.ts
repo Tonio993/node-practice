@@ -61,7 +61,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
         await this.getTransaction(trx, async (transaction) => {
             result = await this.baseQuery(transaction)
-                .where(filters as object)
+                .where(filters as object || {})
         })
 
         return Promise.all(result.map(i => this.selectChildren(i, trx)))
@@ -86,6 +86,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
         return result as T
     }
 
+
     // INSERT
 
     async insert(entity: Omit<T, 'id'>, trx?: Knex.Transaction): Promise<T> {
@@ -97,6 +98,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
                 .returning('id')
     
             await this.insertChildren(entity, id, transaction)
+            
             result = await this.findById(id, transaction) as T
         })
 
@@ -126,33 +128,51 @@ export class GenericEntityRepository<T extends BaseEntity> {
         let result: T
 
         await this.getTransaction(trx, async (transaction) => {
-            result = await this.baseQuery(transaction)
+            await this.baseQuery(transaction)
                 .update({ ...omit(entity, this.relations.map(r => r.propertyKey)), id, updated_at: new Date() })
                 .where({ id })
-                .returning('*')
-                .then((res: T[]) => res[0])
-        })
+            
+            await this.updateChildren(id, omit(entity, ['id']), transaction)
 
-        // TODO: update children
+            result = await this.findById(id, transaction) as T
+        })
 
         return result!
     }
 
-    private async updateChildren(id: number, item: Partial<T>, trx?: Knex.Transaction): Promise<void> {
+    private async updateChildren(id: number, item: Partial<Omit<T, 'id'>>, trx?: Knex.Transaction): Promise<void> {
         if (this.relations.length === 0) return
 
-        
         await this.getTransaction(trx, async (transaction) => {
             const existing = await this.findById(id, transaction)
             
             for (const rel of this.relations) {
                 const childRepo = repositoryRegistry.get(rel.targetTable)!
 
-                const existingChildren = existing![rel.propertyKey].map((c: T) => c.id) || []
+                if (item[rel.propertyKey] === undefined) continue
+                
+                const existingChildren = new Set(existing![rel.propertyKey].map((c: T) => c.id))
+                const updatingChildren = new Set(item[rel.propertyKey]!.map((c: T) => c.id).filter((id: number) => id !== undefined))
 
-                if (!item[rel.propertyKey]) continue
                 const toInsert = item[rel.propertyKey]!.filter((child: T) => child.id === undefined)
-                // TODO
+                const toDelete = existing![rel.propertyKey].filter((c: T) => !updatingChildren.has(c.id))
+                
+                const toUpdate = item[rel.propertyKey]!.filter((c: T) => c.id) || []
+                const toUpdateMissing = toUpdate.filter((c : T) => !(existingChildren).has(c.id))
+                if (toUpdateMissing.length > 0) {
+                    throw new Error(`Trying to update entity ${this.tableName} with id ${id} but related entity ${rel.targetTable} was not found for ids ${toUpdateMissing.join(', ')}`)
+                }
+
+                for await (const child of toInsert) {
+                    await childRepo.insert({ ...child, [rel.foreignKey]: id }, transaction)
+                }
+                for (const child of toDelete) {
+                    await childRepo.delete(child.id!, transaction)
+                }
+                for await (const child of toUpdate) {
+                    await childRepo.update(child.id!, omit(child, ['id']), transaction)
+                }
+
             }
         })
     }
@@ -190,8 +210,10 @@ export class GenericEntityRepository<T extends BaseEntity> {
                 }
             }
         })
-
     }
+
+
+    // 
 
     private baseQuery(trx?: Knex.Transaction) {
         let baseQuery = trx ? trx(this.tableName) : this.knex(this.tableName);

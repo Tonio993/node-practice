@@ -1,26 +1,37 @@
+import { toCamelCase } from '../utils/case.util'
+import { renameKeys } from '../utils/object.utils'
 import { GenericEntityRepository } from './generic-entity.repository'
 import type { BaseEntity } from './generic-entity.type'
 
 export class GenericEntityService<T extends BaseEntity> {
   constructor(protected readonly repo: GenericEntityRepository<T>) {}
 
-  getAll(): Promise<T[]> {
-    return this.repo.findAll()
+  async getAll(): Promise<T[]> {
+    const result = await this.repo.findAll()
+    return result.map(i => renameKeys(i, toCamelCase)) as T[]
   }
 
-  getById(id: number): Promise<T | undefined> {
-    return this.repo.findById(id)
+  async getById(id: number): Promise<T | undefined> {
+    const result = await this.repo.findById(id)
+    return result ? renameKeys(result, toCamelCase) as T : undefined
   }
 
-  insert(entity: Omit<T, 'id'>): Promise<T> {
-    return this.repo.insert(entity)
+  async getByExample(example: Partial<T>): Promise<T[]> {
+    const result = await this.repo.findByExample(example)
+    return result.map(i => renameKeys(i, toCamelCase)) as T[]
   }
 
-  update(id: number, entity: Partial<Omit<T, 'id'>>): Promise<T> {
-    return this.repo.update(id, entity)
+  async insert(entity: Omit<T, 'id'>): Promise<T> {
+    const result = await this.repo.insert(entity)
+    return renameKeys(result, toCamelCase) as T
   }
 
-  delete(id: number): Promise<boolean> {
-    return this.repo.delete(id)
+  async update(id: number, entity: Partial<Omit<T, 'id'>>): Promise<T> {
+    const result = await this.repo.update(id, entity)
+    return renameKeys(result, toCamelCase) as T
+  }
+
+  async delete(id: number): Promise<boolean> {
+    return await this.repo.delete(id)
   }
 }

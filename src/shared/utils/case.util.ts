@@ -1,4 +1,4 @@
-export function toSnakeCase(str: string): string {
+export const toSnakeCase = function(str: string): string {
   return str
     // 1. separa acronimi seguiti da parola normale
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
@@ -7,7 +7,7 @@ export function toSnakeCase(str: string): string {
     .toLowerCase();
 }
 
-export function toCamelCase(str: string): string {
+export const toCamelCase = function(str: string): string {
   return str
     .toLowerCase()
     .replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());

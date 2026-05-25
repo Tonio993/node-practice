@@ -6,12 +6,13 @@ export class GenericEntityRoutes<T extends BaseEntity> {
     readonly router: Router
 
     constructor(
-        private readonly controller: GenericEntityController<T>
+        controller: GenericEntityController<T>
     ) {
         this.router = Router()
 
         this.router.get('/', controller.findAll)
         this.router.get('/:id', controller.findById)
+        this.router.post('/example', controller.findByExample)
 
         this.router.post('/', controller.insert)
 

@@ -6,20 +6,28 @@ export class GenericEntityController<T extends BaseEntity> {
 
     constructor(
         private readonly service: GenericEntityService<T>
-    ) {}
+    ) { }
+
+    findAll = async (req: Request, res: Response): Promise<void> => {
+        const result = await this.service.getAll()
+
+        res.json(result)
+    }
 
     findById = async (req: Request, res: Response): Promise<void> => {
         const id = Number(req.params.id)
 
         const result = await this.service.getById(id)
-    
+
         result ?
-        res.json(result) :
-        res.status(404).json({error: `Entity with id ${id} not found`})
+            res.json(result) :
+            res.status(404).json({ error: `Entity with id ${id} not found` })
     }
 
-    findAll = async (req: Request, res: Response): Promise<void> => {
-        const result = await this.service.getAll()
+    findByExample = async (req: Request, res: Response): Promise<void> => {
+        const example = req.body
+
+        const result = await this.service.getByExample(example)
 
         res.json(result)
     }
@@ -39,8 +47,8 @@ export class GenericEntityController<T extends BaseEntity> {
         const result = await this.service.update(id, body)
 
         result ?
-        res.json(result) :
-        res.status(404).json({error: `Entity with id ${id} not found`})
+            res.json(result) :
+            res.status(404).json({ error: `Entity with id ${id} not found` })
     }
 
     delete = async (req: Request, res: Response): Promise<void> => {
@@ -49,8 +57,8 @@ export class GenericEntityController<T extends BaseEntity> {
         const deleted = await this.service.delete(id)
 
         deleted ?
-        res.status(200).end() :
-        res.status(404).json({error: `Entity with id ${id} not found`})
+            res.status(200).end() :
+            res.status(404).json({ error: `Entity with id ${id} not found` })
     }
 
 }
