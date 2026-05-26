@@ -92,10 +92,11 @@ export class GenericEntityRepository<T extends BaseEntity> {
             for (const rel of this.relations) {
                 const childRepo = this.getChildRepo(rel)
 
-                result[rel.propertyKey] = await childRepo.findByExample(
+                const children = await childRepo._findByExample(
                     { [rel.foreignKey]: item.id } as any,
                     transaction
                 )
+                result[rel.propertyKey] = children.map(c => omit(c, [rel.foreignKey]))
             }
         })
 
@@ -136,7 +137,8 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
                 if (!item[rel.propertyKey]) continue
                 for await (const child of item[rel.propertyKey] as Array<any>) {
-                    await childRepo.insert({ ...child, [rel.foreignKey]: id }, transaction)
+                    const dbChild = this.mapToDbEntity({ ...child, [rel.foreignKey]: id })
+                    await childRepo._insert(dbChild, child, transaction)
                 }
             }
         })
@@ -192,13 +194,15 @@ export class GenericEntityRepository<T extends BaseEntity> {
                 }
 
                 for (const child of toDelete) {
-                    await childRepo.delete(child.id!, transaction)
+                    await childRepo._delete(child.id!, transaction)
                 }
                 for await (const child of toInsert) {
-                    await childRepo.insert({ ...child, [rel.foreignKey]: id }, transaction)
+                    const dbChild = this.mapToDbEntity({ ...child, [rel.foreignKey]: id })
+                    await childRepo._insert(dbChild, child, transaction)
                 }
                 for await (const child of toUpdate) {
-                    await childRepo.update(child.id!, omit(child, ['id']), transaction)
+                    const dbChild = this.mapToDbEntity(omit(child, ['id']))
+                    await childRepo._update(child.id!, dbChild, omit(child, ['id']), transaction)
                 }
 
             }
@@ -235,10 +239,10 @@ export class GenericEntityRepository<T extends BaseEntity> {
             for (const rel of this.relations) {
                 const childRepo = this.getChildRepo(rel)
 
-                const children = await childRepo.findByExample({ [rel.foreignKey]: id }, transaction)
+                const children = await childRepo._findByExample({ [rel.foreignKey]: id }, transaction)
     
                 for (const child of children) {
-                    await childRepo.delete(child.id!, transaction)
+                    await childRepo._delete(child.id!, transaction)
                 }
             }
         })
