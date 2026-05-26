@@ -1,5 +1,6 @@
 import { Knex } from 'knex'
-import { omit } from '../utils/object.utils'
+import { omit, renameKeys } from '../utils/object.utils'
+import { toCamelCase, toSnakeCase } from '../utils/case.util'
 import { getEntityMetadata, getRelations, RelationMetadata } from './generic-entity.decorator'
 import { repositoryRegistry } from './generic-entity.registry'
 import { BaseEntity } from './generic-entity.type'
@@ -39,12 +40,27 @@ export class GenericEntityRepository<T extends BaseEntity> {
     // SELECT
 
     async findAll(trx?: Knex.Transaction): Promise<T[]> {
-        const result = await this.baseQuery(trx)
-
-        return Promise.all(result.map(i => this.selectChildren(i, trx)))
+        const result = await this._findAll(trx)
+        return result.map(i => this.mapDbEntity(i))
     }
 
     async findById(id: number, trx?: Knex.Transaction): Promise<T | undefined> {
+        const result = await this._findById(id, trx)
+        return result ? this.mapDbEntity(result) : undefined
+    }
+
+    async findByExample(filters: Partial<T>, trx?: Knex.Transaction): Promise<T[]> {
+        const dbFilters = this.mapToDbEntity(filters as Record<string, unknown>)
+        const result = await this._findByExample(dbFilters, trx)
+        return result.map(i => this.mapDbEntity(i))
+    }
+
+    private async _findAll(trx?: Knex.Transaction): Promise<any[]> {
+        const result = await this.baseQuery(trx)
+        return Promise.all(result.map(i => this.selectChildren(i, trx)))
+    }
+
+    private async _findById(id: number, trx?: Knex.Transaction): Promise<any | undefined> {
         let result = undefined
 
         await this.getTransaction(trx, async (transaction) => {
@@ -56,8 +72,8 @@ export class GenericEntityRepository<T extends BaseEntity> {
         return result ? await this.selectChildren(result, trx) : undefined
     }
 
-    async findByExample(filters: Partial<T>, trx?: Knex.Transaction): Promise<T[]> {
-        let result: T[] = []
+    private async _findByExample(filters: Record<string, unknown>, trx?: Knex.Transaction): Promise<any[]> {
+        let result: any[] = []
 
         await this.getTransaction(trx, async (transaction) => {
             result = await this.baseQuery(transaction)
@@ -67,7 +83,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
         return Promise.all(result.map(i => this.selectChildren(i, trx)))
     }
 
-    private async selectChildren(item: T, trx?: Knex.Transaction): Promise<T> {
+    private async selectChildren(item: any, trx?: Knex.Transaction): Promise<any> {
         if (this.relations.length === 0) return item
         
         let result: any = { ...item }
@@ -83,23 +99,29 @@ export class GenericEntityRepository<T extends BaseEntity> {
             }
         })
 
-        return result as T
+        return result
     }
 
 
     // INSERT
 
     async insert(entity: Omit<T, 'id'>, trx?: Knex.Transaction): Promise<T> {
-        let result: T
+        const dbEntity = this.mapToDbEntity(omit(entity as object, this.relations.map(r => r.propertyKey)) as Record<string, unknown>)
+        const result = await this._insert(dbEntity, entity, trx)
+        return this.mapDbEntity(result)
+    }
+
+    private async _insert(entity: Record<string, unknown>, original: Omit<T, 'id'>, trx?: Knex.Transaction): Promise<any> {
+        let result: any
 
         await this.getTransaction(trx, async (transaction) => {
             const [{ id }]: { id: number }[] = await this.baseQuery(transaction)
-                .insert(omit(entity, this.relations.map(r => r.propertyKey)))
+                .insert(entity)
                 .returning('id')
     
-            await this.insertChildren(entity, id, transaction)
+            await this.insertChildren(original, id, transaction)
             
-            result = await this.findById(id, transaction) as T
+            result = await this._findById(id, transaction)
         })
 
         return result!
@@ -125,16 +147,22 @@ export class GenericEntityRepository<T extends BaseEntity> {
     // UPDATE
 
     async update(id: number, entity: Partial<Omit<T, 'id'>>, trx?: Knex.Transaction): Promise<T> {
-        let result: T
+        const dbEntity = this.mapToDbEntity(omit(entity as object, this.relations.map(r => r.propertyKey)) as Record<string, unknown>)
+        const result = await this._update(id, dbEntity, entity, trx)
+        return this.mapDbEntity(result)
+    }
+
+    private async _update(id: number, entity: Record<string, unknown>, item: Partial<Omit<T, 'id'>>, trx?: Knex.Transaction): Promise<any> {
+        let result: any
 
         await this.getTransaction(trx, async (transaction) => {
             await this.baseQuery(transaction)
-                .update({ ...omit(entity, this.relations.map(r => r.propertyKey)), id, updated_at: new Date() })
+                .update({ ...entity, id, updated_at: new Date() })
                 .where({ id })
             
-            await this.updateChildren(id, omit(entity, ['id']), transaction)
+            await this.updateChildren(id, item, transaction)
 
-            result = await this.findById(id, transaction) as T
+            result = await this._findById(id, transaction)
         })
 
         return result!
@@ -144,7 +172,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
         if (this.relations.length === 0) return
 
         await this.getTransaction(trx, async (transaction) => {
-            const existing = await this.findById(id, transaction)
+            const existing = await this._findById(id, transaction)
             
             for (const rel of this.relations) {
                 const childRepo = this.getChildRepo(rel)
@@ -181,6 +209,10 @@ export class GenericEntityRepository<T extends BaseEntity> {
     // DELETE
 
     async delete(id: number, trx?: Knex.Transaction): Promise<boolean> {
+        return await this._delete(id, trx)
+    }
+
+    private async _delete(id: number, trx?: Knex.Transaction): Promise<boolean> {
         let affectedRows = 0
 
         await this.getTransaction(trx, async (transaction) => {
@@ -214,6 +246,14 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
 
     // UTILITIES
+
+    private mapDbEntity(item: Record<string, unknown>): T {
+        return renameKeys(item, toCamelCase) as T
+    }
+
+    private mapToDbEntity(item: Record<string, unknown>): Record<string, unknown> {
+        return renameKeys(item, toSnakeCase)
+    }
 
     private baseQuery(trx?: Knex.Transaction) {
         let baseQuery = trx ? trx(this.tableName) : this.knex(this.tableName);
