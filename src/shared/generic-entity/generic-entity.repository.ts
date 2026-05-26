@@ -56,13 +56,13 @@ export class GenericEntityRepository<T extends BaseEntity> {
     }
 
     async insert(entity: Omit<T, 'id'>, trx?: Knex.Transaction): Promise<T> {
-        const dbEntity = this.preparePayloadForInsert(entity)
+        const dbEntity = this.preparePayload(entity)
         const created = await this._insert(dbEntity, entity, trx)
         return this.mapDbEntity(created)
     }
 
     async update(id: number, entity: Partial<Omit<T, 'id'>>, trx?: Knex.Transaction): Promise<T> {
-        const dbEntity = this.preparePayloadForUpdate(entity)
+        const dbEntity = this.preparePayload(entity)
         const updated = await this._update(id, dbEntity, entity, trx)
         return this.mapDbEntity(updated)
     }
@@ -282,11 +282,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
     // HELPERS
 
-    private preparePayloadForInsert(entity: Omit<T, 'id'>): DbEntity {
-        return this.mapToDbEntity(omit(entity as object, this.relations.map(r => r.propertyKey)) as DbEntity)
-    }
-
-    private preparePayloadForUpdate(entity: Partial<Omit<T, 'id'>>): DbEntity {
+    private preparePayload(entity: Partial<Omit<T, 'id'>>): DbEntity {
         return this.mapToDbEntity(omit(entity as object, this.relations.map(r => r.propertyKey)) as DbEntity)
     }
 
