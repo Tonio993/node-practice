@@ -74,8 +74,8 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
         await this.getTransaction(trx, async (transaction) => {
             for (const rel of this.relations) {
-                const childRepo = repositoryRegistry.get(rel.targetTable)!
-    
+                const childRepo = this.getChildRepo(rel)
+
                 result[rel.propertyKey] = await childRepo.findByExample(
                     { [rel.foreignKey]: item.id } as any,
                     transaction
@@ -110,8 +110,8 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
         await this.getTransaction(trx, async (transaction) => {
             for (const rel of this.relations) {
-                const childRepo = repositoryRegistry.get(rel.targetTable)!
-    
+                const childRepo = this.getChildRepo(rel)
+
                 if (!item[rel.propertyKey]) continue
                 for await (const child of item[rel.propertyKey] as Array<any>) {
                     await childRepo.insert({ ...child, [rel.foreignKey]: id }, transaction)
@@ -147,27 +147,27 @@ export class GenericEntityRepository<T extends BaseEntity> {
             const existing = await this.findById(id, transaction)
             
             for (const rel of this.relations) {
-                const childRepo = repositoryRegistry.get(rel.targetTable)!
+                const childRepo = this.getChildRepo(rel)
 
                 if (item[rel.propertyKey] === undefined) continue
                 
                 const existingChildren = new Set(existing![rel.propertyKey].map((c: T) => c.id))
                 const updatingChildren = new Set(item[rel.propertyKey]!.map((c: T) => c.id).filter((id: number) => id !== undefined))
 
-                const toInsert = item[rel.propertyKey]!.filter((child: T) => child.id === undefined)
                 const toDelete = existing![rel.propertyKey].filter((c: T) => !updatingChildren.has(c.id))
+                const toInsert = item[rel.propertyKey]!.filter((child: T) => child.id === undefined)
                 
                 const toUpdate = item[rel.propertyKey]!.filter((c: T) => c.id) || []
                 const toUpdateMissing = toUpdate.filter((c : T) => !(existingChildren).has(c.id))
                 if (toUpdateMissing.length > 0) {
-                    throw new Error(`Trying to update entity ${this.tableName} with id ${id} but related entity ${rel.targetTable} was not found for ids ${toUpdateMissing.join(', ')}`)
+                    throw new Error(`Trying to update entity ${this.tableName} with id ${id} but related entity ${rel.targetEntity().name} was not found for ids ${toUpdateMissing.join(', ')}`)
                 }
 
-                for await (const child of toInsert) {
-                    await childRepo.insert({ ...child, [rel.foreignKey]: id }, transaction)
-                }
                 for (const child of toDelete) {
                     await childRepo.delete(child.id!, transaction)
+                }
+                for await (const child of toInsert) {
+                    await childRepo.insert({ ...child, [rel.foreignKey]: id }, transaction)
                 }
                 for await (const child of toUpdate) {
                     await childRepo.update(child.id!, omit(child, ['id']), transaction)
@@ -201,8 +201,8 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
         await this.getTransaction(trx, async (transaction) => {
             for (const rel of this.relations) {
-                const childRepo = repositoryRegistry.get(rel.targetTable)!
-    
+                const childRepo = this.getChildRepo(rel)
+
                 const children = await childRepo.findByExample({ [rel.foreignKey]: id }, transaction)
     
                 for (const child of children) {
@@ -213,7 +213,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
     }
 
 
-    // 
+    // UTILITIES
 
     private baseQuery(trx?: Knex.Transaction) {
         let baseQuery = trx ? trx(this.tableName) : this.knex(this.tableName);
@@ -228,6 +228,16 @@ export class GenericEntityRepository<T extends BaseEntity> {
             return callback(trx)
         }
         return this.knex.transaction(callback)
+    }
+
+    private getChildRepo(rel: RelationMetadata): GenericEntityRepository<any> {
+        const targetEntity = rel.targetEntity()
+        const targetEntityMetadata = getEntityMetadata(targetEntity)
+        if (!targetEntityMetadata) {
+            throw new Error(`Target entity ${targetEntity.name} is missing @Entity decorator`)
+        }
+        const targetTable = targetEntityMetadata.tableName!
+        return repositoryRegistry.get(targetTable)!
     }
 
 }
