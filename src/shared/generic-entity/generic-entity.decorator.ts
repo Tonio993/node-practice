@@ -15,6 +15,11 @@ export interface Relation {
   propertyKey: string
   targetEntity: () => Function
   foreignKey: string
+  mappedBy?: string
+}
+
+export interface RelationOptions {
+  mappedBy?: string
 }
 
 export interface Relations {
@@ -48,14 +53,21 @@ function addRelation(
   propertyKey: string,
   targetEntity: () => Function,
   foreignKey: string,
-  relationType: keyof Relations
+  relationType: keyof Relations,
+  options?: RelationOptions
 ) {
   const constructor = target.constructor as Function
   const metadata = getStructuredMetadata(constructor)
 
   metadata.relations[relationType] = [
     ...metadata.relations[relationType],
-    { type: relationType, propertyKey, targetEntity, foreignKey },
+    {
+      type: relationType,
+      propertyKey,
+      targetEntity,
+      foreignKey,
+      mappedBy: options?.mappedBy,
+    },
   ]
 
   saveStructuredMetadata(constructor, metadata)
@@ -77,21 +89,21 @@ export function Entity(entityMetadata?: EntityInfo) {
   }
 }
 
-export function OneToMany(targetEntity: () => Function, foreignKey: string) {
+export function OneToMany(targetEntity: () => Function, foreignKey: string, options?: RelationOptions) {
   return function (target: object, propertyKey: string) {
-    addRelation(target, propertyKey, targetEntity, foreignKey, 'oneToMany')
+    addRelation(target, propertyKey, targetEntity, foreignKey, 'oneToMany', options)
   }
 }
 
-export function ManyToOne(targetEntity: () => Function, foreignKey: string) {
+export function ManyToOne(targetEntity: () => Function, foreignKey: string, options?: RelationOptions) {
   return function (target: object, propertyKey: string) {
-    addRelation(target, propertyKey, targetEntity, foreignKey, 'manyToOne')
+    addRelation(target, propertyKey, targetEntity, foreignKey, 'manyToOne', options)
   }
 }
 
-export function OneToOne(targetEntity: () => Function, foreignKey: string) {
+export function OneToOne(targetEntity: () => Function, foreignKey: string, options?: RelationOptions) {
   return function (target: object, propertyKey: string) {
-    addRelation(target, propertyKey, targetEntity, foreignKey, 'oneToOne')
+    addRelation(target, propertyKey, targetEntity, foreignKey, 'oneToOne', options)
   }
 }
 

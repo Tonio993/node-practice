@@ -237,6 +237,13 @@ export class GenericEntityRepository<T extends BaseEntity> {
         const result = items.map(item => ({ ...item }))
 
         for (const rel of this.manyToOneRelations) {
+            const inverse = this.getInverseRelation(rel)
+            if (inverse) {
+                // This relation is bidirectional and has an explicit inverse mapping.
+                // We load the parent object here, but we avoid automatically traversing
+                // back to the child side in the same fetch to prevent recursive loops.
+            }
+
             const parentIds = result
                 .map(item => item[rel.foreignKey])
                 .filter((id): id is number => typeof id === 'number')
@@ -271,10 +278,17 @@ export class GenericEntityRepository<T extends BaseEntity> {
         }
 
         // One-to-one relations are treated as a single parent object referenced by a local foreign key.
-        // The decorated property is assumed to be the owning side of the relation.
+        // The decorated property is assumed to be the owning side unless mappedBy is provided.
         const result = items.map(item => ({ ...item }))
 
         for (const rel of this.oneToOneRelations) {
+            const inverse = this.getInverseRelation(rel)
+            if (inverse) {
+                // This is a bidirectional one-to-one relationship.
+                // We load the related entity, but avoid implicitly traversing the inverse
+                // property in the same fetch to prevent nested cycles.
+            }
+
             const parentIds = result
                 .map(item => item[rel.foreignKey])
                 .filter((id): id is number => typeof id === 'number')
@@ -450,7 +464,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
         const relationTypesWithLocalForeignKey = [
             ...this.manyToOneRelations,
             ...this.oneToOneRelations,
-        ]
+        ].filter(rel => !rel.mappedBy)
 
         for (const rel of relationTypesWithLocalForeignKey) {
             const relationValue = entity[rel.propertyKey]
@@ -500,6 +514,16 @@ export class GenericEntityRepository<T extends BaseEntity> {
             return callback(trx)
         }
         return this.knex.transaction(callback)
+    }
+
+    private getInverseRelation(rel: Relation): Relation | undefined {
+        const targetRepo = this.getRelationRepository(rel)
+
+        if (rel.mappedBy) {
+            return targetRepo.relations.find(targetRel => targetRel.propertyKey === rel.mappedBy)
+        }
+
+        return targetRepo.relations.find(targetRel => targetRel.mappedBy === rel.propertyKey)
     }
 
     private getRelationRepository(rel: Relation): GenericEntityRepository<any> {
