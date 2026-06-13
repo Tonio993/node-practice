@@ -266,8 +266,41 @@ export class GenericEntityRepository<T extends BaseEntity> {
     }
 
     private async loadOneToOneRelations(items: DbEntity[], trx?: Knex.Transaction): Promise<DbEntity[]> {
-        // TODO: implement eager loading of one-to-one relations
-        return items
+        if (this.oneToOneRelations.length === 0 || items.length === 0) {
+            return items
+        }
+
+        // One-to-one relations are treated as a single parent object referenced by a local foreign key.
+        // The decorated property is assumed to be the owning side of the relation.
+        const result = items.map(item => ({ ...item }))
+
+        for (const rel of this.oneToOneRelations) {
+            const parentIds = result
+                .map(item => item[rel.foreignKey])
+                .filter((id): id is number => typeof id === 'number')
+
+            if (parentIds.length === 0) {
+                continue
+            }
+
+            const parentRepo = this.getRelationRepository(rel)
+            const parentRows = await parentRepo.baseQuery(trx)
+                .whereIn('id', parentIds)
+
+            const parentById = new Map<number, DbEntity>()
+            for (const parent of parentRows) {
+                const parentId = parent.id
+                if (typeof parentId !== 'number') continue
+                parentById.set(parentId, renameKeys(parent, toCamelCase))
+            }
+
+            for (const item of result) {
+                const parentId = item[rel.foreignKey]
+                item[rel.propertyKey] = parentId !== undefined ? parentById.get(parentId as number) : undefined
+            }
+        }
+
+        return result
     }
 
     private async insertChildren(item: Omit<T, 'id'>, id: number, trx?: Knex.Transaction): Promise<void> {
@@ -306,7 +339,8 @@ export class GenericEntityRepository<T extends BaseEntity> {
     }
 
     private async insertOneToOneRelations(item: Omit<T, 'id'>, id: number, trx?: Knex.Transaction): Promise<void> {
-        // One-to-one relation handling requires defining the owning side.
+        // One-to-one properties use a local foreign key when this side is the owning side.
+        // The foreign key is already written by preparePayload, so no separate insert action is required.
         return
     }
 
@@ -369,7 +403,8 @@ export class GenericEntityRepository<T extends BaseEntity> {
     }
 
     private async updateOneToOneRelations(id: number, item: Partial<Omit<T, 'id'>>, existing: DbEntity, trx: Knex.Transaction): Promise<void> {
-        // One-to-one relation updates depend on the owning side configuration.
+        // One-to-one updates are handled through the local foreign key on this entity.
+        // Any change to the associated object id is already reflected by preparePayload.
         return
     }
 
@@ -401,7 +436,8 @@ export class GenericEntityRepository<T extends BaseEntity> {
     }
 
     private async deleteOneToOneRelations(id: number, trx: Knex.Transaction): Promise<void> {
-        // One-to-one cleanup depends on the defined owning side and cascade strategy.
+        // If this entity owns the one-to-one foreign key, deleting it does not automatically delete the related record.
+        // Parent cleanup should be handled explicitly if required by the domain.
         return
     }
 
@@ -411,7 +447,12 @@ export class GenericEntityRepository<T extends BaseEntity> {
         const relationPropertyKeys = this.relations.map(r => r.propertyKey)
         const payload = omit(entity as object, relationPropertyKeys) as DbEntity
 
-        for (const rel of this.manyToOneRelations) {
+        const relationTypesWithLocalForeignKey = [
+            ...this.manyToOneRelations,
+            ...this.oneToOneRelations,
+        ]
+
+        for (const rel of relationTypesWithLocalForeignKey) {
             const relationValue = entity[rel.propertyKey]
             if (relationValue && typeof relationValue === 'object' && !Array.isArray(relationValue)) {
                 const relationObject = relationValue as Record<string, unknown>
@@ -419,12 +460,13 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
                 if (typeof relationId === 'number') {
                     // Convert the nested parent object into its foreign key value.
-                    // This allows a client to pass { parent: { id: 5 } } while storing id_parent = 5.
+                    // This allows a client to pass { related: { id: 5 } } and persist id_related = 5.
                     payload[rel.foreignKey] = relationId
                 } else if (Object.keys(relationObject).length > 0) {
-                    // We cannot automatically persist a related parent entity when only partial data is provided.
+                    // We cannot automatically persist a related entity when only partial data is provided.
+                    // This keeps the relation handling simple and avoids unexpected cascade persistence.
                     throw new Error(
-                        `Cannot persist many-to-one relation '${rel.propertyKey}' for ${this.tableName} without an id on ${rel.targetEntity().name}`
+                        `Cannot persist relation '${rel.propertyKey}' for ${this.tableName} without an id on ${rel.targetEntity().name}`
                     )
                 }
             }
