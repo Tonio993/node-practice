@@ -269,7 +269,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
             for (const parent of parentRows) {
                 const parentId = parent.id
                 if (typeof parentId !== 'number') continue
-                parentById.set(parentId, renameKeys(parent, toCamelCase))
+                parentById.set(parentId, parent)
             }
 
             for (const item of result) {
@@ -336,7 +336,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
             for (const parent of parentRows) {
                 const relationKey = parent[keyByCurrentId]
                 if (typeof relationKey !== 'number') continue
-                parentById.set(relationKey, renameKeys(parent, toCamelCase))
+                parentById.set(relationKey, parent)
             }
 
             for (const item of result) {
