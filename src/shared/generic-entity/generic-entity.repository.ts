@@ -1,14 +1,14 @@
 import { Knex } from 'knex'
 import { omit, renameKeys } from '../utils/object.utils'
 import { toCamelCase, toSnakeCase } from '../utils/case.util'
-import { getEntityMetadata, getRelations, RelationMetadata } from './generic-entity.decorator'
+import { getEntityMetadata, getRelations, Relation } from './generic-entity.decorator'
 import { repositoryRegistry } from './generic-entity.registry'
 import { BaseEntity } from './generic-entity.type'
 
 type DbEntity = Record<string, unknown>
 
 export class GenericEntityRepository<T extends BaseEntity> {
-    protected readonly relations: RelationMetadata[] = []
+    protected readonly relations: Relation[] = []
     protected readonly _tableName: string
     protected readonly _tableSchema?: string
 
@@ -313,7 +313,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
         return this.knex.transaction(callback)
     }
 
-    private getChildRepo(rel: RelationMetadata): GenericEntityRepository<any> {
+    private getChildRepo(rel: Relation): GenericEntityRepository<any> {
         const targetEntity = rel.targetEntity()
         const targetEntityMetadata = getEntityMetadata(targetEntity)
         if (!targetEntityMetadata) {
