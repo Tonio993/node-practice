@@ -168,26 +168,26 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
     // RELATION HANDLING
 
-    private async loadChildren(item: DbEntity, trx?: Knex.Transaction): Promise<DbEntity> {
-        const [result] = await this.loadChildrenForMany([item], trx)
+    private async loadChildren(item: DbEntity, trx?: Knex.Transaction, skipRelationKeys: Set<string> = new Set()): Promise<DbEntity> {
+        const [result] = await this.loadChildrenForMany([item], trx, skipRelationKeys)
         return result
     }
 
-    private async loadChildrenForMany(items: DbEntity[], trx?: Knex.Transaction): Promise<DbEntity[]> {
+    private async loadChildrenForMany(items: DbEntity[], trx?: Knex.Transaction, skipRelationKeys: Set<string> = new Set()): Promise<DbEntity[]> {
         if (items.length === 0) {
             return items
         }
 
         let result = items.map(item => ({ ...item }))
 
-        result = await this.loadOneToManyRelations(result, trx)
-        result = await this.loadManyToOneRelations(result, trx)
-        result = await this.loadOneToOneRelations(result, trx)
+        result = await this.loadOneToManyRelations(result, trx, skipRelationKeys)
+        result = await this.loadManyToOneRelations(result, trx, skipRelationKeys)
+        result = await this.loadOneToOneRelations(result, trx, skipRelationKeys)
 
         return result
     }
 
-    private async loadOneToManyRelations(items: DbEntity[], trx?: Knex.Transaction): Promise<DbEntity[]> {
+    private async loadOneToManyRelations(items: DbEntity[], trx?: Knex.Transaction, skipRelationKeys: Set<string> = new Set()): Promise<DbEntity[]> {
         if (this.oneToManyRelations.length === 0 || items.length === 0) {
             return items
         }
@@ -203,9 +203,18 @@ export class GenericEntityRepository<T extends BaseEntity> {
         const result = items.map(item => ({ ...item }))
 
         for (const rel of this.oneToManyRelations) {
+            if (skipRelationKeys.has(rel.propertyKey)) {
+                continue
+            }
+
             const childRepo = this.getRelationRepository(rel)
-            const childRows = await childRepo.baseQuery(trx)
+            let childRows = await childRepo.baseQuery(trx)
                 .whereIn(rel.foreignKey, parentIds)
+
+            const inverse = this.getInverseRelation(rel)
+            if (inverse) {
+                childRows = await childRepo.loadChildrenForMany(childRows, trx, new Set([inverse.propertyKey]))
+            }
 
             const childrenByParent = new Map<number, DbEntity[]>()
 
@@ -227,21 +236,16 @@ export class GenericEntityRepository<T extends BaseEntity> {
         return result
     }
 
-    private async loadManyToOneRelations(items: DbEntity[], trx?: Knex.Transaction): Promise<DbEntity[]> {
+    private async loadManyToOneRelations(items: DbEntity[], trx?: Knex.Transaction, skipRelationKeys: Set<string> = new Set()): Promise<DbEntity[]> {
         if (this.manyToOneRelations.length === 0 || items.length === 0) {
             return items
         }
 
-        // Many-to-one relations are loaded by querying the parent table
-        // using the local foreign key stored on each child entity.
         const result = items.map(item => ({ ...item }))
 
         for (const rel of this.manyToOneRelations) {
-            const inverse = this.getInverseRelation(rel)
-            if (inverse) {
-                // This relation is bidirectional and has an explicit inverse mapping.
-                // We load the parent object here, but we avoid automatically traversing
-                // back to the child side in the same fetch to prevent recursive loops.
+            if (skipRelationKeys.has(rel.propertyKey)) {
+                continue
             }
 
             const parentIds = result
@@ -253,8 +257,13 @@ export class GenericEntityRepository<T extends BaseEntity> {
             }
 
             const parentRepo = this.getRelationRepository(rel)
-            const parentRows = await parentRepo.baseQuery(trx)
+            let parentRows = await parentRepo.baseQuery(trx)
                 .whereIn('id', parentIds)
+
+            const inverse = this.getInverseRelation(rel)
+            if (inverse) {
+                parentRows = await parentRepo.loadChildrenForMany(parentRows, trx, new Set([inverse.propertyKey]))
+            }
 
             const parentById = new Map<number, DbEntity>()
             for (const parent of parentRows) {
@@ -266,51 +275,76 @@ export class GenericEntityRepository<T extends BaseEntity> {
             for (const item of result) {
                 const parentId = item[rel.foreignKey]
                 item[rel.propertyKey] = parentId !== undefined ? parentById.get(parentId as number) : undefined
+                delete item[rel.foreignKey]
             }
         }
 
         return result
     }
 
-    private async loadOneToOneRelations(items: DbEntity[], trx?: Knex.Transaction): Promise<DbEntity[]> {
+    private async loadOneToOneRelations(items: DbEntity[], trx?: Knex.Transaction, skipRelationKeys: Set<string> = new Set()): Promise<DbEntity[]> {
         if (this.oneToOneRelations.length === 0 || items.length === 0) {
             return items
         }
 
-        // One-to-one relations are treated as a single parent object referenced by a local foreign key.
-        // The decorated property is assumed to be the owning side unless mappedBy is provided.
         const result = items.map(item => ({ ...item }))
 
         for (const rel of this.oneToOneRelations) {
-            const inverse = this.getInverseRelation(rel)
-            if (inverse) {
-                // This is a bidirectional one-to-one relationship.
-                // We load the related entity, but avoid implicitly traversing the inverse
-                // property in the same fetch to prevent nested cycles.
-            }
-
-            const parentIds = result
-                .map(item => item[rel.foreignKey])
-                .filter((id): id is number => typeof id === 'number')
-
-            if (parentIds.length === 0) {
+            if (skipRelationKeys.has(rel.propertyKey)) {
                 continue
             }
 
+            const inverse = this.getInverseRelation(rel)
             const parentRepo = this.getRelationRepository(rel)
-            const parentRows = await parentRepo.baseQuery(trx)
-                .whereIn('id', parentIds)
+            let parentRows: DbEntity[] = []
+            let keyByCurrentId = 'id'
+
+            if (rel.mappedBy) {
+                if (!inverse) {
+                    continue
+                }
+
+                const currentIds = result
+                    .map(item => item.id)
+                    .filter((id): id is number => typeof id === 'number')
+
+                if (currentIds.length === 0) {
+                    continue
+                }
+
+                parentRows = await parentRepo.baseQuery(trx)
+                    .whereIn(inverse.foreignKey, currentIds)
+                keyByCurrentId = inverse.foreignKey
+            } else {
+                const parentIds = result
+                    .map(item => item[rel.foreignKey])
+                    .filter((id): id is number => typeof id === 'number')
+
+                if (parentIds.length === 0) {
+                    continue
+                }
+
+                parentRows = await parentRepo.baseQuery(trx)
+                    .whereIn('id', parentIds)
+            }
+
+            if (inverse) {
+                parentRows = await parentRepo.loadChildrenForMany(parentRows, trx, new Set([inverse.propertyKey]))
+            }
 
             const parentById = new Map<number, DbEntity>()
             for (const parent of parentRows) {
-                const parentId = parent.id
-                if (typeof parentId !== 'number') continue
-                parentById.set(parentId, renameKeys(parent, toCamelCase))
+                const relationKey = parent[keyByCurrentId]
+                if (typeof relationKey !== 'number') continue
+                parentById.set(relationKey, renameKeys(parent, toCamelCase))
             }
 
             for (const item of result) {
-                const parentId = item[rel.foreignKey]
-                item[rel.propertyKey] = parentId !== undefined ? parentById.get(parentId as number) : undefined
+                const lookupId = rel.mappedBy ? item.id : item[rel.foreignKey]
+                item[rel.propertyKey] = lookupId !== undefined ? parentById.get(lookupId as number) : undefined
+                if (!rel.mappedBy) {
+                    delete item[rel.foreignKey]
+                }
             }
         }
 
@@ -463,8 +497,8 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
         const relationTypesWithLocalForeignKey = [
             ...this.manyToOneRelations,
-            ...this.oneToOneRelations,
-        ].filter(rel => !rel.mappedBy)
+            ...this.oneToOneRelations.filter(rel => !rel.mappedBy),
+        ]
 
         for (const rel of relationTypesWithLocalForeignKey) {
             const relationValue = entity[rel.propertyKey]
