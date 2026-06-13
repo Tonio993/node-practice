@@ -8,7 +8,10 @@ export interface EntityInfo {
   tableSchema?: string
 }
 
+export type RelationType = 'oneToMany' | 'manyToOne' | 'oneToOne'
+
 export interface Relation {
+  type: RelationType
   propertyKey: string
   targetEntity: () => Function
   foreignKey: string
@@ -52,7 +55,7 @@ function addRelation(
 
   metadata.relations[relationType] = [
     ...metadata.relations[relationType],
-    { propertyKey, targetEntity, foreignKey },
+    { type: relationType, propertyKey, targetEntity, foreignKey },
   ]
 
   saveStructuredMetadata(constructor, metadata)
@@ -93,7 +96,11 @@ export function OneToOne(targetEntity: () => Function, foreignKey: string) {
 }
 
 export function getEntityMetadata(target: Function): EntityInfo {
-  return getStructuredMetadata(target).entity
+  return getStructuredMetadata(target).entity ?? {}
+}
+
+export function hasEntityMetadata(target: Function): boolean {
+  return getStructuredMetadata(target).entity !== undefined
 }
 
 export function getOneToManyRelations(target: Function): Relation[] {

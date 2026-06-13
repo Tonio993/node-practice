@@ -1,7 +1,14 @@
 import { Knex } from 'knex'
-import { omit, renameKeys } from '../utils/object.utils'
 import { toCamelCase, toSnakeCase } from '../utils/case.util'
-import { getEntityMetadata, getRelations, Relation } from './generic-entity.decorator'
+import { omit, renameKeys } from '../utils/object.utils'
+import {
+    getEntityMetadata,
+    getManyToOneRelations,
+    getOneToManyRelations,
+    getOneToOneRelations,
+    hasEntityMetadata,
+    Relation
+} from './generic-entity.decorator'
 import { repositoryRegistry } from './generic-entity.registry'
 import { BaseEntity } from './generic-entity.type'
 
@@ -9,6 +16,9 @@ type DbEntity = Record<string, unknown>
 
 export class GenericEntityRepository<T extends BaseEntity> {
     protected readonly relations: Relation[] = []
+    protected readonly oneToManyRelations: Relation[] = []
+    protected readonly manyToOneRelations: Relation[] = []
+    protected readonly oneToOneRelations: Relation[] = []
     protected readonly _tableName: string
     protected readonly _tableSchema?: string
 
@@ -26,11 +36,18 @@ export class GenericEntityRepository<T extends BaseEntity> {
     ) {
         const entityMetadata = getEntityMetadata(entityClass)
 
-        if (!entityMetadata) {
+        if (!hasEntityMetadata(entityClass)) {
             throw new Error(`Entity class ${entityClass.name} is missing @Entity decorator`)
         }
 
-        this.relations = getRelations(entityClass)
+        this.oneToManyRelations = getOneToManyRelations(entityClass)
+        this.manyToOneRelations = getManyToOneRelations(entityClass)
+        this.oneToOneRelations = getOneToOneRelations(entityClass)
+        this.relations = [
+            ...this.oneToManyRelations,
+            ...this.manyToOneRelations,
+            ...this.oneToOneRelations,
+        ]
         this._tableName = entityMetadata.tableName || entityClass.name.toLowerCase()
         this._tableSchema = entityMetadata.tableSchema
 
@@ -157,7 +174,21 @@ export class GenericEntityRepository<T extends BaseEntity> {
     }
 
     private async loadChildrenForMany(items: DbEntity[], trx?: Knex.Transaction): Promise<DbEntity[]> {
-        if (this.relations.length === 0 || items.length === 0) {
+        if (items.length === 0) {
+            return items
+        }
+
+        let result = items.map(item => ({ ...item }))
+
+        result = await this.loadOneToManyRelations(result, trx)
+        result = await this.loadManyToOneRelations(result, trx)
+        result = await this.loadOneToOneRelations(result, trx)
+
+        return result
+    }
+
+    private async loadOneToManyRelations(items: DbEntity[], trx?: Knex.Transaction): Promise<DbEntity[]> {
+        if (this.oneToManyRelations.length === 0 || items.length === 0) {
             return items
         }
 
@@ -171,8 +202,8 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
         const result = items.map(item => ({ ...item }))
 
-        for (const rel of this.relations) {
-            const childRepo = this.getChildRepo(rel)
+        for (const rel of this.oneToManyRelations) {
+            const childRepo = this.getRelationRepository(rel)
             const childRows = await childRepo.baseQuery(trx)
                 .whereIn(rel.foreignKey, parentIds)
 
@@ -196,94 +227,210 @@ export class GenericEntityRepository<T extends BaseEntity> {
         return result
     }
 
-    private async insertChildren(item: Omit<T, 'id'>, id: number, trx?: Knex.Transaction): Promise<void> {
-        if (this.relations.length === 0) return
+    private async loadManyToOneRelations(items: DbEntity[], trx?: Knex.Transaction): Promise<DbEntity[]> {
+        if (this.manyToOneRelations.length === 0 || items.length === 0) {
+            return items
+        }
 
-        await this.getTransaction(trx, async (transaction) => {
-            for (const rel of this.relations) {
-                const childRepo = this.getChildRepo(rel)
-                const children = this.getChildrenArray(item[rel.propertyKey])
+        // Many-to-one relations are loaded by querying the parent table
+        // using the local foreign key stored on each child entity.
+        const result = items.map(item => ({ ...item }))
 
-                if (children.length === 0) continue
+        for (const rel of this.manyToOneRelations) {
+            const parentIds = result
+                .map(item => item[rel.foreignKey])
+                .filter((id): id is number => typeof id === 'number')
 
-                const dbChildren = children.map(child => this.mapToDbEntity({
-                    ...child,
-                    [rel.foreignKey]: id,
-                }))
-
-                for await (const dbChild of dbChildren) {
-                    await childRepo._insert(dbChild, dbChild as any, transaction)
-                }
+            if (parentIds.length === 0) {
+                continue
             }
+
+            const parentRepo = this.getRelationRepository(rel)
+            const parentRows = await parentRepo.baseQuery(trx)
+                .whereIn('id', parentIds)
+
+            const parentById = new Map<number, DbEntity>()
+            for (const parent of parentRows) {
+                const parentId = parent.id
+                if (typeof parentId !== 'number') continue
+                parentById.set(parentId, renameKeys(parent, toCamelCase))
+            }
+
+            for (const item of result) {
+                const parentId = item[rel.foreignKey]
+                item[rel.propertyKey] = parentId !== undefined ? parentById.get(parentId as number) : undefined
+            }
+        }
+
+        return result
+    }
+
+    private async loadOneToOneRelations(items: DbEntity[], trx?: Knex.Transaction): Promise<DbEntity[]> {
+        // TODO: implement eager loading of one-to-one relations
+        return items
+    }
+
+    private async insertChildren(item: Omit<T, 'id'>, id: number, trx?: Knex.Transaction): Promise<void> {
+        await this.getTransaction(trx, async (transaction) => {
+            await this.insertOneToManyChildren(item, id, transaction)
+            await this.insertManyToOneRelations(item, id, transaction)
+            await this.insertOneToOneRelations(item, id, transaction)
         })
+    }
+
+    private async insertOneToManyChildren(item: Omit<T, 'id'>, id: number, trx?: Knex.Transaction): Promise<void> {
+        if (this.oneToManyRelations.length === 0) return
+
+        for (const rel of this.oneToManyRelations) {
+            const childRepo = this.getRelationRepository(rel)
+            const children = this.getChildrenArray(item[rel.propertyKey])
+
+            if (children.length === 0) continue
+
+            const dbChildren = children.map(child => this.mapToDbEntity({
+                ...child,
+                [rel.foreignKey]: id,
+            }))
+
+            for (const dbChild of dbChildren) {
+                await childRepo._insert(dbChild, dbChild as any, trx)
+            }
+        }
+    }
+
+    private async insertManyToOneRelations(item: Omit<T, 'id'>, id: number, trx?: Knex.Transaction): Promise<void> {
+        // For many-to-one, the foreign key is stored on this entity rather than on a child entity.
+        // The preparation of the payload already maps any provided parent id to the local foreign key.
+        // Therefore there is no separate child insertion step for this relation type.
+        return
+    }
+
+    private async insertOneToOneRelations(item: Omit<T, 'id'>, id: number, trx?: Knex.Transaction): Promise<void> {
+        // One-to-one relation handling requires defining the owning side.
+        return
     }
 
     private async updateChildren(id: number, item: Partial<Omit<T, 'id'>>, trx?: Knex.Transaction): Promise<void> {
-        if (this.relations.length === 0) return
-
         await this.getTransaction(trx, async (transaction) => {
             const existing = await this._findById(id, transaction)
             if (!existing) {
-                throw new Error(`Entity ${this.tableName} with id ${id} was not found`) 
+                throw new Error(`Entity ${this.tableName} with id ${id} was not found`)
             }
 
-            for (const rel of this.relations) {
-                const childRepo = this.getChildRepo(rel)
-                const children = this.getChildrenArray(item[rel.propertyKey])
-                const existingChildren = this.getChildrenArray(existing[rel.propertyKey])
-
-                const existingIds = new Set(existingChildren.map(child => child.id).filter((value): value is number => typeof value === 'number'))
-                const updatingIds = new Set(children.map(child => child.id).filter((value): value is number => typeof value === 'number'))
-
-                const toDelete = existingChildren.filter(child => child.id !== undefined && !updatingIds.has(child.id))
-                const toInsert = children.filter(child => child.id === undefined)
-                const toUpdate = children.filter(child => child.id !== undefined)
-                const toUpdateMissing = toUpdate.filter(child => child.id !== undefined && !existingIds.has(child.id))
-
-                if (toUpdateMissing.length > 0) {
-                    throw new Error(`Trying to update entity ${this.tableName} with id ${id} but related entity ${rel.targetEntity().name} was not found for ids ${toUpdateMissing.map(child => child.id).join(', ')}`)
-                }
-
-                for (const child of toDelete) {
-                    await childRepo._delete(child.id!, transaction)
-                }
-
-                for (const child of toInsert) {
-                    const dbChild = this.mapToDbEntity({
-                        ...child,
-                        [rel.foreignKey]: id,
-                    })
-                    await childRepo._insert(dbChild, child, transaction)
-                }
-
-                for (const child of toUpdate) {
-                    const dbChild = this.mapToDbEntity(omit(child, ['id']))
-                    await childRepo._update(child.id!, dbChild, omit(child, ['id']), transaction)
-                }
-            }
+            await this.updateOneToManyChildren(id, item, existing, transaction)
+            await this.updateManyToOneRelations(id, item, existing, transaction)
+            await this.updateOneToOneRelations(id, item, existing, transaction)
         })
     }
 
-    private async deleteChildren(id: number, trx?: Knex.Transaction): Promise<void> {
-        if (this.relations.length === 0) return
+    private async updateOneToManyChildren(id: number, item: Partial<Omit<T, 'id'>>, existing: DbEntity, trx: Knex.Transaction): Promise<void> {
+        if (this.oneToManyRelations.length === 0) return
 
-        await this.getTransaction(trx, async (transaction) => {
-            for (const rel of this.relations) {
-                const childRepo = this.getChildRepo(rel)
-                const childRows = await childRepo.baseQuery(transaction)
-                    .where({ [rel.foreignKey]: id })
+        for (const rel of this.oneToManyRelations) {
+            const childRepo = this.getRelationRepository(rel)
+            const children = this.getChildrenArray(item[rel.propertyKey])
+            const existingChildren = this.getChildrenArray(existing[rel.propertyKey])
 
-                for (const child of childRows) {
-                    await childRepo._delete(child.id! as number, transaction)
-                }
+            const existingIds = new Set(existingChildren.map(child => child.id).filter((value): value is number => typeof value === 'number'))
+            const updatingIds = new Set(children.map(child => child.id).filter((value): value is number => typeof value === 'number'))
+
+            const toDelete = existingChildren.filter(child => child.id !== undefined && !updatingIds.has(child.id))
+            const toInsert = children.filter(child => child.id === undefined)
+            const toUpdate = children.filter(child => child.id !== undefined)
+            const toUpdateMissing = toUpdate.filter(child => child.id !== undefined && !existingIds.has(child.id))
+
+            if (toUpdateMissing.length > 0) {
+                throw new Error(`Trying to update entity ${this.tableName} with id ${id} but related entity ${rel.targetEntity().name} was not found for ids ${toUpdateMissing.map(child => child.id).join(', ')}`)
             }
+
+            for (const child of toDelete) {
+                await childRepo._delete(child.id!, trx)
+            }
+
+            for (const child of toInsert) {
+                const dbChild = this.mapToDbEntity({
+                    ...child,
+                    [rel.foreignKey]: id,
+                })
+                await childRepo._insert(dbChild, child, trx)
+            }
+
+            for (const child of toUpdate) {
+                const dbChild = this.mapToDbEntity(omit(child, ['id']))
+                await childRepo._update(child.id!, dbChild, omit(child, ['id']), trx)
+            }
+        }
+    }
+
+    private async updateManyToOneRelations(id: number, item: Partial<Omit<T, 'id'>>, existing: DbEntity, trx: Knex.Transaction): Promise<void> {
+        // Many-to-one updates are represented by changes to the local foreign key on this entity.
+        // Since preparePayload already captures parent ids from nested objects, no separate update step is required.
+        return
+    }
+
+    private async updateOneToOneRelations(id: number, item: Partial<Omit<T, 'id'>>, existing: DbEntity, trx: Knex.Transaction): Promise<void> {
+        // One-to-one relation updates depend on the owning side configuration.
+        return
+    }
+
+    private async deleteChildren(id: number, trx?: Knex.Transaction): Promise<void> {
+        await this.getTransaction(trx, async (transaction) => {
+            await this.deleteOneToManyChildren(id, transaction)
+            await this.deleteManyToOneRelations(id, transaction)
+            await this.deleteOneToOneRelations(id, transaction)
         })
+    }
+
+    private async deleteOneToManyChildren(id: number, trx: Knex.Transaction): Promise<void> {
+        if (this.oneToManyRelations.length === 0) return
+
+        for (const rel of this.oneToManyRelations) {
+            const childRepo = this.getRelationRepository(rel)
+            const childRows = await childRepo.baseQuery(trx)
+                .where({ [rel.foreignKey]: id })
+
+            for (const child of childRows) {
+                await childRepo._delete(child.id! as number, trx)
+            }
+        }
+    }
+
+    private async deleteManyToOneRelations(id: number, trx: Knex.Transaction): Promise<void> {
+        // Many-to-one relations generally do not require deleting related entities.
+        return
+    }
+
+    private async deleteOneToOneRelations(id: number, trx: Knex.Transaction): Promise<void> {
+        // One-to-one cleanup depends on the defined owning side and cascade strategy.
+        return
     }
 
     // HELPERS
 
     private preparePayload(entity: Partial<Omit<T, 'id'>>): DbEntity {
-        return this.mapToDbEntity(omit(entity as object, this.relations.map(r => r.propertyKey)) as DbEntity)
+        const relationPropertyKeys = this.relations.map(r => r.propertyKey)
+        const payload = omit(entity as object, relationPropertyKeys) as DbEntity
+
+        for (const rel of this.manyToOneRelations) {
+            const relationValue = entity[rel.propertyKey]
+            if (relationValue && typeof relationValue === 'object' && !Array.isArray(relationValue)) {
+                const relationObject = relationValue as Record<string, unknown>
+                const relationId = relationObject.id
+
+                if (typeof relationId === 'number') {
+                    // Convert the nested parent object into its foreign key value.
+                    // This allows a client to pass { parent: { id: 5 } } while storing id_parent = 5.
+                    payload[rel.foreignKey] = relationId
+                } else if (Object.keys(relationObject).length > 0) {
+                    // We cannot automatically persist a related parent entity when only partial data is provided.
+                    throw new Error(
+                        `Cannot persist many-to-one relation '${rel.propertyKey}' for ${this.tableName} without an id on ${rel.targetEntity().name}`
+                    )
+                }
+            }
+        }
+
+        return this.mapToDbEntity(payload)
     }
 
     private getChildrenArray(value: unknown): Array<any> {
@@ -313,7 +460,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
         return this.knex.transaction(callback)
     }
 
-    private getChildRepo(rel: Relation): GenericEntityRepository<any> {
+    private getRelationRepository(rel: Relation): GenericEntityRepository<any> {
         const targetEntity = rel.targetEntity()
         const targetEntityMetadata = getEntityMetadata(targetEntity)
         if (!targetEntityMetadata) {
