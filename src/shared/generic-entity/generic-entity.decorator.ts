@@ -22,7 +22,7 @@ export interface Relations {
 
 export class EntityMetadata {
   entity: EntityInfo | undefined
-  relations: Relations | undefined
+  relations: Relations = { oneToMany: [], manyToOne: [], oneToOne: [] }
 }
 
 function getStructuredMetadata(target: Function): EntityMetadata {
@@ -45,6 +45,10 @@ function addRelation(
 ) {
   const constructor = target.constructor as Function
   const metadata = getStructuredMetadata(constructor)
+
+  if (!metadata.relations) {
+    metadata.relations = { oneToMany: [], manyToOne: [], oneToOne: [] }
+  }
 
   metadata.relations[relationType] = [
     ...metadata.relations[relationType],
@@ -89,26 +93,26 @@ export function OneToOne(targetEntity: () => Function, foreignKey: string) {
 }
 
 export function getEntityMetadata(target: Function): EntityInfo {
-  return getStructuredMetadata(target).entity
+  return getStructuredMetadata(target).entity!
 }
 
 export function getOneToManyRelations(target: Function): Relation[] {
-  return getStructuredMetadata(target).relations.oneToMany
+  return getStructuredMetadata(target).relations?.oneToMany ?? []
 }
 
 export function getManyToOneRelations(target: Function): Relation[] {
-  return getStructuredMetadata(target).relations.manyToOne
+  return getStructuredMetadata(target).relations?.manyToOne ?? []
 }
 
 export function getOneToOneRelations(target: Function): Relation[] {
-  return getStructuredMetadata(target).relations.oneToOne
+  return getStructuredMetadata(target).relations?.oneToOne ?? []
 }
 
 export function getRelations(target: Function): Relation[] {
   const relations = getStructuredMetadata(target).relations
   return [
-    ...relations.oneToMany,
-    ...relations.manyToOne,
-    ...relations.oneToOne,
+    ...(relations?.oneToMany ?? []),
+    ...(relations?.manyToOne ?? []),
+    ...(relations?.oneToOne ?? []),
   ]
 }
