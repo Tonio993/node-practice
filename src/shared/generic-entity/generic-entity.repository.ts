@@ -1,24 +1,17 @@
 import { Knex } from 'knex'
 import { toCamelCase, toSnakeCase } from '../utils/case.util'
 import { omit, renameKeys } from '../utils/object.utils'
-import {
-    getEntityMetadata,
-    getManyToOneRelations,
-    getOneToManyRelations,
-    getOneToOneRelations,
-    hasEntityMetadata,
-    Relation,
-} from './generic-entity.decorator'
 import { repositoryRegistry } from './generic-entity.registry'
 import { BaseEntity } from './generic-entity.type'
+import { EngineEntityDefinition, EngineRelationDefinition } from './engine-entity-definition'
 
 type DbEntity = Record<string, unknown>
 
 export class GenericEntityRepository<T extends BaseEntity> {
-    protected readonly relations: Relation[] = []
-    protected readonly oneToManyRelations: Relation[] = []
-    protected readonly manyToOneRelations: Relation[] = []
-    protected readonly oneToOneRelations: Relation[] = []
+    protected readonly relations: EngineRelationDefinition[] = []
+    protected readonly oneToManyRelations: EngineRelationDefinition[] = []
+    protected readonly manyToOneRelations: EngineRelationDefinition[] = []
+    protected readonly oneToOneRelations: EngineRelationDefinition[] = []
     protected readonly _tableName: string
     protected readonly _tableSchema?: string
 
@@ -32,24 +25,18 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
     constructor(
         protected readonly knex: Knex,
-        entityClass: Function
+        entityDefinition: EngineEntityDefinition
     ) {
-        const entityMetadata = getEntityMetadata(entityClass)
-
-        if (!hasEntityMetadata(entityClass)) {
-            throw new Error(`Entity class ${entityClass.name} is missing @Entity decorator`)
-        }
-
-        this.oneToManyRelations = getOneToManyRelations(entityClass)
-        this.manyToOneRelations = getManyToOneRelations(entityClass)
-        this.oneToOneRelations = getOneToOneRelations(entityClass)
+        this.oneToManyRelations = entityDefinition.relations.oneToMany
+        this.manyToOneRelations = entityDefinition.relations.manyToOne
+        this.oneToOneRelations = entityDefinition.relations.oneToOne
         this.relations = [
             ...this.oneToManyRelations,
             ...this.manyToOneRelations,
             ...this.oneToOneRelations,
         ]
-        this._tableName = entityMetadata?.tableName || entityClass.name.toLowerCase()
-        this._tableSchema = entityMetadata?.tableSchema
+        this._tableName = entityDefinition.tableName
+        this._tableSchema = entityDefinition.tableSchema
 
         repositoryRegistry.register(this.tableName, this)
     }
@@ -420,7 +407,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
             const toUpdateMissing = toUpdate.filter(child => child.id !== undefined && !existingIds.has(child.id))
 
             if (toUpdateMissing.length > 0) {
-                throw new Error(`Trying to update entity ${this.tableName} with id ${id} but related entity ${rel.targetEntity().name} was not found for ids ${toUpdateMissing.map(child => child.id).join(', ')}`)
+                throw new Error(`Trying to update entity ${this.tableName} with id ${id} but related rows in ${rel.targetTableName} were not found for ids ${toUpdateMissing.map(child => child.id).join(', ')}`)
             }
 
             for (const child of toDelete) {
@@ -501,7 +488,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
                     payload[rel.foreignKey] = relationId
                 } else if (Object.keys(relationObject).length > 0) {
                     throw new Error(
-                        `Cannot persist relation '${rel.propertyKey}' for ${this.tableName} without an id on ${rel.targetEntity().name}`
+                        `Cannot persist relation '${rel.propertyKey}' for ${this.tableName} without an id on target table ${rel.targetTableName}`
                     )
                 }
             }
@@ -524,7 +511,8 @@ export class GenericEntityRepository<T extends BaseEntity> {
 
     private baseQuery(trx?: Knex.Transaction) {
         let baseQuery = trx ? trx(this.tableName) : this.knex(this.tableName)
-        if (this.tableSchema) {
+        const client = String(this.knex.client.config.client || '').toLowerCase()
+        if (this.tableSchema && this.tableSchema !== 'public' && !client.includes('sqlite')) {
             baseQuery = baseQuery.withSchema(this.tableSchema)
         }
         return baseQuery
@@ -537,7 +525,7 @@ export class GenericEntityRepository<T extends BaseEntity> {
         return this.knex.transaction(callback)
     }
 
-    private getInverseRelation(rel: Relation): Relation | undefined {
+    private getInverseRelation(rel: EngineRelationDefinition): EngineRelationDefinition | undefined {
         const targetRepo = this.getRelationRepository(rel)
 
         if (rel.mappedBy) {
@@ -547,17 +535,10 @@ export class GenericEntityRepository<T extends BaseEntity> {
         return targetRepo.relations.find(targetRel => targetRel.mappedBy === rel.propertyKey)
     }
 
-    private getRelationRepository(rel: Relation): GenericEntityRepository<any> {
-        const targetEntity = rel.targetEntity()
-        const targetEntityMetadata = getEntityMetadata(targetEntity)
-        if (!targetEntityMetadata) {
-            throw new Error(`Target entity ${targetEntity.name} is missing @Entity decorator`)
-        }
-
-        const targetTable = targetEntityMetadata.tableName!
-        const repo = repositoryRegistry.get(targetTable)
+    private getRelationRepository(rel: EngineRelationDefinition): GenericEntityRepository<any> {
+        const repo = repositoryRegistry.get(rel.targetTableName)
         if (!repo) {
-            throw new Error(`Repository for target table ${targetTable} is not registered`)
+            throw new Error(`Repository for target table ${rel.targetTableName} is not registered`)
         }
 
         return repo
