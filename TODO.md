@@ -40,11 +40,26 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
    - limite attuale:
      - `manyToMany`/join table non ancora implementato (da coprire negli step successivi)
 
-4. [IN CORSO] Integrazione con il framework generico
+4. [COMPLETATO] Integrazione con il framework generico
    - far sì che il repository generico possa usare il modello runtime invece di dipendere solo dai decorator statici
    - mantenere il comportamento CRUD invariato
-   - prossimo focus pratico:
-     - introdurre un adapter che esponga metadati runtime in formato compatibile con il repository generico
+   - note implementative:
+    - introdotto `src/shared/generic-entity/engine-entity-definition.ts` con:
+       - `EngineEntityDefinition`
+       - `EngineRelationDefinition`
+       - `EngineEntityDefinitionAdapter` per convertire sia classi decorate `@Entity` sia `SchemaConceptDefinition` nello stesso formato canonico usato dal motore
+     - naming aggiornato da `Runtime*` a `Engine*` per evitare ambiguità: le definizioni sono trasversali (statiche + dinamiche), non solo "runtime"
+     - semplificato `GenericEntityRepository` per usare una sola tipologia di metadati (`RuntimeEntityDefinition`), eliminando branching interno tra statico e dinamico
+     - `GenericEntityFactory` ora normalizza sempre l'input verso la definizione canonica prima di creare repository/service/controller
+     - `GenericEntityFactory` rifattorizzata con costruttore monotipo su `EngineEntityDefinition` e factory method espliciti:
+       - `fromDecoratedEntity(...)`
+       - `fromEngineDefinition(...)`
+       per confinare la conversione statica/dinamica al boundary di bootstrap
+     - preservato comportamento CRUD e caricamento relazioni (one-to-many, many-to-one, one-to-one)
+     - migliorata compatibilità cross-dialect del repository: lo schema viene applicato solo quando supportato dal client (evita `withSchema` su sqlite)
+   - validazione:
+     - aggiunto test di integrazione runtime in `tests/generic-entity.repository.runtime.test.ts`
+     - suite completa test passata
 
 5. [PENDENTE] Aggiunta di un layer di runtime API
    - permettere di creare/aggiornare concetti, campi e relazioni
