@@ -29,8 +29,24 @@ describe('schema management service', () => {
       table.boolean('unique').defaultTo(false)
       table.string('default_value')
       table.boolean('primary_key').defaultTo(false)
+      table.string('column_name')
+      table.string('label')
+      table.string('description')
+      table.integer('position')
       table.timestamps(true, true)
       table.unique(['id_concept', 'name'])
+    })
+
+    await db.schema.createTable('concept_relation', (table) => {
+      table.increments('id').notNullable()
+      table.integer('id_concept_source').unsigned().notNullable()
+      table.integer('id_concept_target').unsigned().notNullable()
+      table.string('relation_type').notNullable()
+      table.string('foreign_key').notNullable()
+      table.string('mapped_by')
+      table.string('source_field')
+      table.string('target_field')
+      table.timestamps(true, true)
     })
   })
 
@@ -71,5 +87,33 @@ describe('schema management service', () => {
     expect(hasTable).toBe(true)
     expect(hasUsernameColumn).toBe(true)
     expect(hasPasswordColumn).toBe(true)
+  })
+
+  it('creates foreign key columns from concept relations', async () => {
+    const [accountId] = await db('concept').insert({
+      name: 'Account',
+      table_name: 'account',
+      table_schema: 'concept_configuration',
+    }) as number[]
+
+    const [userId] = await db('concept').insert({
+      name: 'User',
+      table_name: 'user',
+      table_schema: 'concept_configuration',
+    }) as number[]
+
+    await db('concept_relation').insert({
+      id_concept_source: userId,
+      id_concept_target: accountId,
+      relation_type: 'manyToOne',
+      foreign_key: 'account_id',
+    })
+
+    const service = new SchemaManagementService(db)
+    await service.syncFromConfiguration()
+
+    const hasAccountIdColumn = await db.schema.hasColumn('user', 'account_id')
+
+    expect(hasAccountIdColumn).toBe(true)
   })
 })

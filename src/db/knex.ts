@@ -84,6 +84,50 @@ export async function initDb(): Promise<void> {
         }
     }
 
+    if (!await db.schema.withSchema('concept_configuration').hasTable('concept_relation')) {
+        await db.schema.withSchema('concept_configuration').createTable('concept_relation', (t) => {
+            t.increments('id').notNullable()
+            t.integer('id_concept_source').unsigned().notNullable()
+            t.integer('id_concept_target').unsigned().notNullable()
+            t.foreign('id_concept_source').references('id').inTable('concept_configuration.concept')
+            t.foreign('id_concept_target').references('id').inTable('concept_configuration.concept')
+            t.string('relation_type').notNullable()
+            t.string('foreign_key').notNullable()
+            t.string('mapped_by').nullable()
+            t.string('source_field').nullable()
+            t.string('target_field').nullable()
+            t.timestamps(true, true)
+
+            t.unique(['id_concept_source', 'id_concept_target', 'foreign_key'])
+        })
+    } else {
+        const hasRelationType = await db.schema.withSchema('concept_configuration').hasColumn('concept_relation', 'relation_type')
+        const hasForeignKey = await db.schema.withSchema('concept_configuration').hasColumn('concept_relation', 'foreign_key')
+        const hasMappedBy = await db.schema.withSchema('concept_configuration').hasColumn('concept_relation', 'mapped_by')
+        const hasSourceField = await db.schema.withSchema('concept_configuration').hasColumn('concept_relation', 'source_field')
+        const hasTargetField = await db.schema.withSchema('concept_configuration').hasColumn('concept_relation', 'target_field')
+
+        if (!hasRelationType || !hasForeignKey || !hasMappedBy || !hasSourceField || !hasTargetField) {
+            await db.schema.withSchema('concept_configuration').alterTable('concept_relation', (t) => {
+                if (!hasRelationType) {
+                    t.string('relation_type').notNullable()
+                }
+                if (!hasForeignKey) {
+                    t.string('foreign_key').notNullable()
+                }
+                if (!hasMappedBy) {
+                    t.string('mapped_by').nullable()
+                }
+                if (!hasSourceField) {
+                    t.string('source_field').nullable()
+                }
+                if (!hasTargetField) {
+                    t.string('target_field').nullable()
+                }
+            })
+        }
+    }
+
     const schemaManagementService = new SchemaManagementService(db)
     await schemaManagementService.syncFromConfiguration()
 
