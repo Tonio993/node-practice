@@ -1,44 +1,16 @@
 import type { Knex } from 'knex'
 import { toSnakeCase } from '../utils/case.util'
-
-export interface SchemaFieldDefinition {
-  name: string
-  type: string
-  nullable?: boolean
-  unique?: boolean
-  defaultValue?: unknown
-  primaryKey?: boolean
-  columnName?: string
-  label?: string
-  description?: string
-  position?: number
-}
-
-export interface SchemaRelationDefinition {
-  id: number
-  sourceConceptId: number
-  targetConceptId: number
-  relationType: string
-  foreignKey: string
-  mappedBy?: string
-  sourceField?: string
-  targetField?: string
-}
-
-export interface SchemaConceptDefinition {
-  id: number
-  name: string
-  tableName?: string | null
-  tableSchema?: string | null
-  fields: SchemaFieldDefinition[]
-  relations: SchemaRelationDefinition[]
-}
+import { SchemaConceptDefinition, SchemaFieldDefinition, SchemaRelationDefinition } from './schema-definition'
 
 export class SchemaManagementService {
   constructor(private readonly db: Knex) {}
 
   async syncFromConfiguration(): Promise<void> {
     const concepts = await this.loadConceptDefinitions()
+    await this.applyConceptDefinitions(concepts)
+  }
+
+  private async applyConceptDefinitions(concepts: SchemaConceptDefinition[]): Promise<void> {
     const conceptsById = new Map(concepts.map((concept) => [concept.id, concept]))
 
     for (const concept of concepts) {
@@ -55,26 +27,33 @@ export class SchemaManagementService {
     const fieldRows = await this.getTable('concept_field', 'concept_configuration').select('*')
     const relationRows = await this.getTable('concept_relation', 'concept_configuration').select('*')
 
+    return this.mapRowsToConceptDefinitions(conceptRows, fieldRows, relationRows)
+  }
+
+  private mapRowsToConceptDefinitions(
+    conceptRows: Array<Record<string, any>>,
+    fieldRows: Array<Record<string, any>>,
+    relationRows: Array<Record<string, any>>
+  ): SchemaConceptDefinition[] {
+
     const fieldsByConcept = this.groupFieldsByConcept(fieldRows)
     const relationsByConcept = this.groupRelationsByConcept(relationRows)
 
-    return conceptRows.map((row) => ({
-      id: Number(row.id),
-      name: row.name,
-      tableName: row.table_name ?? row.name,
-      tableSchema: row.table_schema ?? 'concept_configuration',
-      fields: fieldsByConcept[Number(row.id)] ?? [],
-      relations: relationsByConcept[Number(row.id)] ?? [],
-    }))
+    return conceptRows.map((row) => new SchemaConceptDefinition(
+      Number(row.id),
+      row.name,
+      row.table_name ?? row.name,
+      row.table_schema ?? 'concept_configuration',
+      fieldsByConcept[Number(row.id)] ?? [],
+      relationsByConcept[Number(row.id)] ?? []
+    ))
   }
 
   private groupFieldsByConcept(fieldRows: Array<Record<string, any>>): Record<number, SchemaFieldDefinition[]> {
     return fieldRows.reduce<Record<number, SchemaFieldDefinition[]>>((acc, row) => {
       const conceptId = Number(row.id_concept)
       acc[conceptId] ||= []
-      acc[conceptId].push({
-        name: row.name,
-        type: row.type,
+      acc[conceptId].push(new SchemaFieldDefinition(row.name, row.type, {
         nullable: row.nullable ?? true,
         unique: Boolean(row.unique),
         defaultValue: row.default_value ?? undefined,
@@ -83,7 +62,7 @@ export class SchemaManagementService {
         label: row.label ?? undefined,
         description: row.description ?? undefined,
         position: row.position !== undefined ? Number(row.position) : undefined,
-      })
+      }))
       return acc
     }, {})
   }
@@ -92,23 +71,23 @@ export class SchemaManagementService {
     return relationRows.reduce<Record<number, SchemaRelationDefinition[]>>((acc, row) => {
       const conceptId = Number(row.id_concept_source)
       acc[conceptId] ||= []
-      acc[conceptId].push({
-        id: Number(row.id),
-        sourceConceptId: conceptId,
-        targetConceptId: Number(row.id_concept_target),
-        relationType: row.relation_type,
-        foreignKey: row.foreign_key,
-        mappedBy: row.mapped_by ?? undefined,
-        sourceField: row.source_field ?? undefined,
-        targetField: row.target_field ?? undefined,
-      })
+      acc[conceptId].push(new SchemaRelationDefinition(
+        Number(row.id),
+        conceptId,
+        Number(row.id_concept_target),
+        row.relation_type,
+        row.foreign_key,
+        row.mapped_by ?? undefined,
+        row.source_field ?? undefined,
+        row.target_field ?? undefined
+      ))
       return acc
     }, {})
   }
 
   private async ensureTable(concept: SchemaConceptDefinition): Promise<void> {
-    const schemaName = concept.tableSchema ?? 'concept_configuration'
-    const tableName = toSnakeCase(String(concept.tableName ?? concept.name))
+    const schemaName = concept.getResolvedTableSchema()
+    const tableName = concept.getResolvedTableName()
 
     const schemaBuilder = this.getSchemaBuilder(schemaName)
     const exists = await schemaBuilder.hasTable(tableName)
@@ -139,30 +118,74 @@ export class SchemaManagementService {
   }
 
   private async ensureRelations(concept: SchemaConceptDefinition, conceptsById: Map<number, SchemaConceptDefinition>): Promise<void> {
-    const schemaName = concept.tableSchema ?? 'concept_configuration'
-    const tableName = toSnakeCase(String(concept.tableName ?? concept.name))
-    const schemaBuilder = this.getSchemaBuilder(schemaName)
-
     for (const relation of concept.relations) {
-      const targetConcept = conceptsById.get(relation.targetConceptId)
-      if (!targetConcept) {
+      const relationContext = this.resolveRelationContext(relation, concept, conceptsById)
+      if (!relationContext) {
         continue
       }
 
-      const targetSchemaName = targetConcept.tableSchema ?? 'concept_configuration'
-      const targetTableName = toSnakeCase(String(targetConcept.tableName ?? targetConcept.name))
-      const columnName = relation.foreignKey || relation.targetField || `${toSnakeCase(targetConcept.name)}_id`
-      const reference = this.buildReferenceName(targetSchemaName, targetTableName)
-
-      const hasColumn = await schemaBuilder.hasColumn(tableName, columnName)
+      const ownerSchemaBuilder = this.getSchemaBuilder(relationContext.ownerSchemaName)
+      const hasColumn = await ownerSchemaBuilder.hasColumn(relationContext.ownerTableName, relationContext.columnName)
       if (hasColumn) {
         continue
       }
 
-      await schemaBuilder.alterTable(tableName, (table) => {
-        table.integer(columnName).unsigned().references('id').inTable(reference)
+      await ownerSchemaBuilder.alterTable(relationContext.ownerTableName, (table) => {
+        const relationColumn = table.integer(relationContext.columnName).unsigned().references('id').inTable(relationContext.reference)
+        if (relationContext.unique) {
+          relationColumn.unique()
+        }
       })
     }
+  }
+
+  private resolveRelationContext(
+    relation: SchemaRelationDefinition,
+    sourceConcept: SchemaConceptDefinition,
+    conceptsById: Map<number, SchemaConceptDefinition>
+  ): {
+    ownerSchemaName: string
+    ownerTableName: string
+    reference: string
+    columnName: string
+    unique: boolean
+  } | null {
+    const targetConcept = conceptsById.get(relation.targetConceptId)
+    if (!targetConcept) {
+      return null
+    }
+
+    const sourceSchemaName = sourceConcept.getResolvedTableSchema()
+    const sourceTableName = sourceConcept.getResolvedTableName()
+    const targetSchemaName = targetConcept.getResolvedTableSchema()
+    const targetTableName = targetConcept.getResolvedTableName()
+
+    if (relation.isManyToOne() || relation.isOneToOne()) {
+      return {
+        ownerSchemaName: sourceSchemaName,
+        ownerTableName: sourceTableName,
+        reference: this.buildReferenceName(targetSchemaName, targetTableName),
+        columnName: this.resolveForeignKeyColumnName(relation, targetConcept),
+        unique: relation.requiresUniqueForeignKey(),
+      }
+    }
+
+    if (relation.isOneToMany()) {
+      return {
+        ownerSchemaName: targetSchemaName,
+        ownerTableName: targetTableName,
+        reference: this.buildReferenceName(sourceSchemaName, sourceTableName),
+        columnName: this.resolveForeignKeyColumnName(relation, sourceConcept),
+        unique: false,
+      }
+    }
+
+    return null
+  }
+
+  private resolveForeignKeyColumnName(relation: SchemaRelationDefinition, defaultTargetConcept: SchemaConceptDefinition): string {
+    const rawName = relation.foreignKey || relation.targetField || `${toSnakeCase(defaultTargetConcept.name)}_id`
+    return toSnakeCase(String(rawName))
   }
 
   private getSchemaBuilder(schemaName: string) {
