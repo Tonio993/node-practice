@@ -19,6 +19,31 @@ export interface RelationOptions {
   mappedBy?: string
 }
 
+export interface ColumnOptions {
+  type?: string
+  nullable?: boolean
+  unique?: boolean
+  defaultValue?: unknown
+  primaryKey?: boolean
+  columnName?: string
+  label?: string
+  description?: string
+  position?: number
+}
+
+export interface ColumnMetadata {
+  propertyKey: string
+  type: string
+  nullable?: boolean
+  unique?: boolean
+  defaultValue?: unknown
+  primaryKey?: boolean
+  columnName?: string
+  label?: string
+  description?: string
+  position?: number
+}
+
 export interface Relations {
   oneToMany: Relation[]
   manyToOne: Relation[]
@@ -28,6 +53,22 @@ export interface Relations {
 export class EntityMetadata {
   entity: EntityInfo | undefined
   relations: Relations = { oneToMany: [], manyToOne: [], oneToOne: [] }
+  columns: ColumnMetadata[] = []
+}
+
+function resolveTypeName(target: object, propertyKey: string, explicitType?: string): string {
+  if (explicitType) {
+    return explicitType
+  }
+
+  const designType = Reflect.getMetadata('design:type', target, propertyKey) as Function | undefined
+  if (designType === String) return 'string'
+  if (designType === Number) return 'integer'
+  if (designType === Boolean) return 'boolean'
+  if (designType === Date) return 'datetime'
+  if (designType === Array) return 'json'
+
+  return 'string'
 }
 
 function getStructuredMetadata(target: Function): EntityMetadata {
@@ -57,6 +98,36 @@ function addRelation(
   metadata.relations[relationType] = [
     ...metadata.relations[relationType],
     { propertyKey, targetEntity, foreignKey, mappedBy: options?.mappedBy },
+  ]
+
+  saveStructuredMetadata(constructor, metadata)
+}
+
+function addColumn(
+  target: object,
+  propertyKey: string,
+  options?: ColumnOptions
+) {
+  const constructor = target.constructor as Function
+  const metadata = getStructuredMetadata(constructor)
+  const columnName = options?.columnName || toSnakeCase(propertyKey)
+
+  const newColumn: ColumnMetadata = {
+    propertyKey,
+    type: resolveTypeName(target, propertyKey, options?.type),
+    nullable: options?.nullable,
+    unique: options?.unique,
+    defaultValue: options?.defaultValue,
+    primaryKey: options?.primaryKey,
+    columnName,
+    label: options?.label,
+    description: options?.description,
+    position: options?.position,
+  }
+
+  metadata.columns = [
+    ...metadata.columns.filter((column) => column.propertyKey !== propertyKey),
+    newColumn,
   ]
 
   saveStructuredMetadata(constructor, metadata)
@@ -96,6 +167,12 @@ export function OneToOne(targetEntity: () => Function, foreignKey: string, optio
   }
 }
 
+export function Column(options?: ColumnOptions) {
+  return function (target: object, propertyKey: string) {
+    addColumn(target, propertyKey, options)
+  }
+}
+
 export function getEntityMetadata(target: Function): EntityInfo | undefined {
   return getStructuredMetadata(target).entity
 }
@@ -123,4 +200,8 @@ export function getRelations(target: Function): Relation[] {
     ...(relations?.manyToOne ?? []),
     ...(relations?.oneToOne ?? []),
   ]
+}
+
+export function getEntityColumns(target: Function): ColumnMetadata[] {
+  return getStructuredMetadata(target).columns ?? []
 }

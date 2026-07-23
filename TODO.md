@@ -49,7 +49,7 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
        - `EngineRelationDefinition`
        - `EngineEntityDefinitionAdapter` per convertire sia classi decorate `@Entity` sia `SchemaConceptDefinition` nello stesso formato canonico usato dal motore
      - naming aggiornato da `Runtime*` a `Engine*` per evitare ambiguità: le definizioni sono trasversali (statiche + dinamiche), non solo "runtime"
-     - semplificato `GenericEntityRepository` per usare una sola tipologia di metadati (`RuntimeEntityDefinition`), eliminando branching interno tra statico e dinamico
+    - semplificato `GenericEntityRepository` per usare una sola tipologia di metadati (`EngineEntityDefinition`), eliminando branching interno tra statico e dinamico
      - `GenericEntityFactory` ora normalizza sempre l'input verso la definizione canonica prima di creare repository/service/controller
      - `GenericEntityFactory` rifattorizzata con costruttore monotipo su `EngineEntityDefinition` e factory method espliciti:
        - `fromDecoratedEntity(...)`
@@ -58,12 +58,45 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
      - preservato comportamento CRUD e caricamento relazioni (one-to-many, many-to-one, one-to-one)
      - migliorata compatibilità cross-dialect del repository: lo schema viene applicato solo quando supportato dal client (evita `withSchema` su sqlite)
    - validazione:
-     - aggiunto test di integrazione runtime in `tests/generic-entity.repository.runtime.test.ts`
+     - aggiunto test di integrazione engine in `tests/generic-entity.repository.engine.test.ts`
      - suite completa test passata
 
 5. [PENDENTE] Aggiunta di un layer di runtime API
    - permettere di creare/aggiornare concetti, campi e relazioni
    - triggerare automaticamente la sincronizzazione dello schema
+
+## Percorso operativo per bootstrap delle tabelle di configurazione via schema manager
+1. [COMPLETATO] Estendere il metadata delle entity statiche
+  - introdurre metadata di colonna (tipo, nullable, unique, default, primaryKey, columnName)
+  - mantenere le relazioni già gestite dai decorator attuali
+  - note implementative:
+    - esteso `EntityMetadata` con raccolta di colonne in `src/shared/generic-entity/generic-entity.decorator.ts`
+    - aggiunto supporto a `ColumnOptions`/`ColumnMetadata` con default automatico di naming snake_case
+    - annotato il modello di configurazione in `src/modules/concepts/concept.type.ts` tramite decorator `@Column`
+    - aggiunto test di regression in `tests/generic-entity.decorator.test.ts` per il naming automatico (`table_name`, `primary_key`)
+
+2. Estendere la definizione canonica engine
+  - aggiungere colonne e vincoli tabella (almeno unique compositi)
+  - mantenere compatibilità con `EngineEntityDefinitionAdapter.fromDecoratedEntity(...)` e con le definizioni da concept
+
+3. Estendere lo schema manager per input in-memory
+  - aggiungere un metodo pubblico (es. `syncFromDefinitions(...)`) oltre a `syncFromConfiguration()`
+  - riusare la stessa pipeline di apply DDL già presente (`ensureTable`, `ensureRelations`)
+
+4. Rifattorizzare il bootstrap in `src/db/knex.ts`
+  - mantenere bootstrap minimo: creazione schema `concept_configuration`
+  - generare le definizioni delle tabelle statiche (`concept`, `concept_field`, `concept_relation`) dalle entity
+  - applicare le definizioni statiche tramite schema manager
+  - eseguire poi `syncFromConfiguration()` per le tabelle dinamiche
+
+5. Aggiungere allineamento dati configurativi base (opzionale ma consigliato)
+  - seed idempotente per righe minime in `concept`, `concept_field`, `concept_relation`
+  - utile per ambienti nuovi dove le tabelle statiche sono create ma il catalogo configurativo è vuoto
+
+6. Coprire i vincoli critici con test dedicati
+  - vincoli unique compositi delle tabelle di configurazione
+  - gestione timestamps `created_at`/`updated_at`
+  - coerenza naming camelCase/snake_case
 
 ## Criteri di accettazione
 - una relazione configurata produce una struttura coerente nel database
