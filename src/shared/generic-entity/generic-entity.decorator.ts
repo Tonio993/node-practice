@@ -12,6 +12,11 @@ export interface Relation {
   propertyKey: string
   targetEntity: () => Function
   foreignKey: string
+  mappedBy?: string
+}
+
+export interface RelationOptions {
+  mappedBy?: string
 }
 
 export interface Relations {
@@ -27,9 +32,7 @@ export class EntityMetadata {
 
 function getStructuredMetadata(target: Function): EntityMetadata {
   const stored = Reflect.getMetadata(ENTITY_METADATA_KEY, target) as EntityMetadata | undefined
-
   return stored || new EntityMetadata()
-
 }
 
 function saveStructuredMetadata(target: Function, metadata: EntityMetadata) {
@@ -41,7 +44,8 @@ function addRelation(
   propertyKey: string,
   targetEntity: () => Function,
   foreignKey: string,
-  relationType: keyof Relations
+  relationType: keyof Relations,
+  options?: RelationOptions
 ) {
   const constructor = target.constructor as Function
   const metadata = getStructuredMetadata(constructor)
@@ -52,7 +56,7 @@ function addRelation(
 
   metadata.relations[relationType] = [
     ...metadata.relations[relationType],
-    { propertyKey, targetEntity, foreignKey },
+    { propertyKey, targetEntity, foreignKey, mappedBy: options?.mappedBy },
   ]
 
   saveStructuredMetadata(constructor, metadata)
@@ -74,26 +78,30 @@ export function Entity(entityMetadata?: EntityInfo) {
   }
 }
 
-export function OneToMany(targetEntity: () => Function, foreignKey: string) {
+export function OneToMany(targetEntity: () => Function, foreignKey: string, options?: RelationOptions) {
   return function (target: object, propertyKey: string) {
-    addRelation(target, propertyKey, targetEntity, foreignKey, 'oneToMany')
+    addRelation(target, propertyKey, targetEntity, foreignKey, 'oneToMany', options)
   }
 }
 
-export function ManyToOne(targetEntity: () => Function, foreignKey: string) {
+export function ManyToOne(targetEntity: () => Function, foreignKey: string, options?: RelationOptions) {
   return function (target: object, propertyKey: string) {
-    addRelation(target, propertyKey, targetEntity, foreignKey, 'manyToOne')
+    addRelation(target, propertyKey, targetEntity, foreignKey, 'manyToOne', options)
   }
 }
 
-export function OneToOne(targetEntity: () => Function, foreignKey: string) {
+export function OneToOne(targetEntity: () => Function, foreignKey: string, options?: RelationOptions) {
   return function (target: object, propertyKey: string) {
-    addRelation(target, propertyKey, targetEntity, foreignKey, 'oneToOne')
+    addRelation(target, propertyKey, targetEntity, foreignKey, 'oneToOne', options)
   }
 }
 
-export function getEntityMetadata(target: Function): EntityInfo {
-  return getStructuredMetadata(target).entity!
+export function getEntityMetadata(target: Function): EntityInfo | undefined {
+  return getStructuredMetadata(target).entity
+}
+
+export function hasEntityMetadata(target: Function): boolean {
+  return getStructuredMetadata(target).entity !== undefined
 }
 
 export function getOneToManyRelations(target: Function): Relation[] {
