@@ -1,5 +1,6 @@
 import type { Knex } from 'knex'
 import { toSnakeCase } from '../utils/case.util'
+import type { EngineEntityDefinition } from './engine-entity-definition'
 import { SchemaConceptDefinition, SchemaFieldDefinition, SchemaRelationDefinition } from './schema-definition'
 
 export class SchemaManagementService {
@@ -7,6 +8,11 @@ export class SchemaManagementService {
 
   async syncFromConfiguration(): Promise<void> {
     const concepts = await this.loadConceptDefinitions()
+    await this.applyConceptDefinitions(concepts)
+  }
+
+  async syncFromDefinitions(definitions: EngineEntityDefinition[]): Promise<void> {
+    const concepts = this.mapEngineDefinitionsToConceptDefinitions(definitions)
     await this.applyConceptDefinitions(concepts)
   }
 
@@ -94,19 +100,20 @@ export class SchemaManagementService {
     if (!exists) {
       await schemaBuilder.createTable(tableName, (table) => {
         this.applyColumns(table, concept.fields)
+        this.applyCreateTableConstraints(table, concept)
       })
       return
     }
 
     const existingColumns = new Set<string>()
     for (const field of concept.fields) {
-      const hasColumn = await schemaBuilder.hasColumn(tableName, field.name)
+      const hasColumn = await schemaBuilder.hasColumn(tableName, this.resolveFieldColumnName(field))
       if (hasColumn) {
-        existingColumns.add(field.name)
+        existingColumns.add(this.resolveFieldColumnName(field))
       }
     }
 
-    const missingColumns = concept.fields.filter((field) => !existingColumns.has(field.name))
+    const missingColumns = concept.fields.filter((field) => !existingColumns.has(this.resolveFieldColumnName(field)))
 
     if (missingColumns.length > 0) {
       await schemaBuilder.alterTable(tableName, (table) => {
@@ -115,6 +122,8 @@ export class SchemaManagementService {
         }
       })
     }
+
+    await this.ensureUniqueConstraints(concept)
   }
 
   private async ensureRelations(concept: SchemaConceptDefinition, conceptsById: Map<number, SchemaConceptDefinition>): Promise<void> {
@@ -223,6 +232,115 @@ export class SchemaManagementService {
     }
   }
 
+  private applyCreateTableConstraints(table: Knex.CreateTableBuilder, concept: SchemaConceptDefinition): void {
+    for (const constraint of concept.tableConstraints) {
+      if (constraint.type !== 'unique' || !constraint.columns.length) {
+        continue
+      }
+
+      table.unique(constraint.columns, constraint.name)
+    }
+  }
+
+  private async ensureUniqueConstraints(concept: SchemaConceptDefinition): Promise<void> {
+    const uniqueConstraints = concept.tableConstraints.filter((constraint) => constraint.type === 'unique' && constraint.columns.length > 0)
+    if (uniqueConstraints.length === 0) {
+      return
+    }
+
+    const schemaBuilder = this.getSchemaBuilder(concept.getResolvedTableSchema())
+    const tableName = concept.getResolvedTableName()
+
+    for (const constraint of uniqueConstraints) {
+      const alreadyExists = await this.hasUniqueConstraint(concept.getResolvedTableSchema(), tableName, constraint.columns, constraint.name)
+      if (alreadyExists) {
+        continue
+      }
+
+      await schemaBuilder.alterTable(tableName, (table) => {
+        table.unique(constraint.columns, constraint.name)
+      })
+    }
+  }
+
+  private async hasUniqueConstraint(
+    schemaName: string,
+    tableName: string,
+    columns: string[],
+    constraintName?: string
+  ): Promise<boolean> {
+    const client = String(this.db.client.config.client || '').toLowerCase()
+    const normalizedColumns = columns.map((column) => column.toLowerCase())
+
+    if (client.includes('sqlite')) {
+      const indexes = await this.db.raw(`PRAGMA index_list('${tableName}')`) as Array<{ name: string; unique: number }>
+      for (const index of indexes) {
+        if (!index.unique) {
+          continue
+        }
+        if (constraintName && index.name === constraintName) {
+          return true
+        }
+
+        const indexColumns = await this.db.raw(`PRAGMA index_info('${index.name}')`) as Array<{ name: string }>
+        const normalizedIndexColumns = indexColumns.map((column) => String(column.name).toLowerCase())
+        if (
+          normalizedIndexColumns.length === normalizedColumns.length
+          && normalizedColumns.every((column, idx) => normalizedIndexColumns[idx] === column)
+        ) {
+          return true
+        }
+      }
+
+      return false
+    }
+
+    const rows = await this.db
+      .select(
+        'tc.constraint_name as constraintName',
+        'kcu.column_name as columnName',
+        'kcu.ordinal_position as ordinalPosition'
+      )
+      .from('information_schema.table_constraints as tc')
+      .join('information_schema.key_column_usage as kcu', function () {
+        this.on('tc.constraint_name', '=', 'kcu.constraint_name')
+          .andOn('tc.table_schema', '=', 'kcu.table_schema')
+          .andOn('tc.table_name', '=', 'kcu.table_name')
+      })
+      .where('tc.constraint_type', 'UNIQUE')
+      .andWhere('tc.table_schema', schemaName)
+      .andWhere('tc.table_name', tableName)
+
+    const columnsByConstraint = new Map<string, Array<{ name: string; position: number }>>()
+    for (const row of rows as Array<{ constraintName: string; columnName: string; ordinalPosition: number }>) {
+      const constraintColumns = columnsByConstraint.get(row.constraintName) ?? []
+      constraintColumns.push({
+        name: String(row.columnName).toLowerCase(),
+        position: Number(row.ordinalPosition),
+      })
+      columnsByConstraint.set(row.constraintName, constraintColumns)
+    }
+
+    for (const [name, constraintColumns] of columnsByConstraint.entries()) {
+      if (constraintName && name !== constraintName) {
+        continue
+      }
+
+      const orderedColumns = constraintColumns
+        .sort((a, b) => a.position - b.position)
+        .map((column) => column.name)
+
+      if (
+        orderedColumns.length === normalizedColumns.length
+        && normalizedColumns.every((column, idx) => orderedColumns[idx] === column)
+      ) {
+        return true
+      }
+    }
+
+    return false
+  }
+
   private applyColumn(table: Knex.CreateTableBuilder | Knex.AlterTableBuilder, field: SchemaFieldDefinition): void {
     const columnBuilder = this.createColumnBuilder(table, field)
 
@@ -244,30 +362,110 @@ export class SchemaManagementService {
   }
 
   private createColumnBuilder(table: Knex.CreateTableBuilder | Knex.AlterTableBuilder, field: SchemaFieldDefinition) {
+    const columnName = this.resolveFieldColumnName(field)
+
     switch (field.type.toLowerCase()) {
       case 'string':
       case 'varchar':
       case 'text':
-        return table.string(field.name)
+        return table.string(columnName)
       case 'integer':
       case 'int':
-        return table.integer(field.name)
+        return table.integer(columnName)
       case 'boolean':
       case 'bool':
-        return table.boolean(field.name)
+        return table.boolean(columnName)
       case 'date':
-        return table.date(field.name)
+        return table.date(columnName)
       case 'datetime':
       case 'timestamp':
-        return table.datetime(field.name)
+        return table.datetime(columnName)
       case 'json':
-        return table.json(field.name)
+        return table.json(columnName)
       case 'decimal':
       case 'float':
       case 'number':
-        return table.float(field.name)
+        return table.float(columnName)
       default:
-        return table.string(field.name)
+        return table.string(columnName)
     }
+  }
+
+  private resolveFieldColumnName(field: SchemaFieldDefinition): string {
+    return toSnakeCase(String(field.columnName ?? field.name))
+  }
+
+  private mapEngineDefinitionsToConceptDefinitions(definitions: EngineEntityDefinition[]): SchemaConceptDefinition[] {
+    const conceptsByTableName = new Map<string, { id: number; definition: EngineEntityDefinition }>()
+    const concepts = definitions.map((definition, index) => {
+      const conceptId = index + 1
+      conceptsByTableName.set(definition.tableName, { id: conceptId, definition })
+
+      const fields = definition.columns.map((column) => new SchemaFieldDefinition(
+        column.name,
+        column.type,
+        {
+          nullable: column.nullable,
+          unique: column.unique,
+          defaultValue: column.defaultValue,
+          primaryKey: column.primaryKey,
+          columnName: column.name,
+          label: column.label,
+          description: column.description,
+          position: column.position,
+        }
+      ))
+
+      return new SchemaConceptDefinition(
+        conceptId,
+        definition.name,
+        definition.tableName,
+        definition.tableSchema,
+        fields,
+        [],
+        definition.tableConstraints.map((constraint) => ({ ...constraint }))
+      )
+    })
+
+    let relationId = 1
+    for (const concept of concepts) {
+      const sourceDefinition = definitions.find((definition) => definition.tableName === concept.getResolvedTableName())
+      if (!sourceDefinition) {
+        continue
+      }
+
+      const appendRelation = (
+        relationType: 'oneToMany' | 'manyToOne' | 'oneToOne',
+        relation: { targetTableName: string; foreignKey: string; mappedBy?: string; propertyKey: string }
+      ) => {
+        const target = conceptsByTableName.get(relation.targetTableName)
+        if (!target) {
+          return
+        }
+
+        concept.relations.push(new SchemaRelationDefinition(
+          relationId++,
+          concept.id,
+          target.id,
+          relationType,
+          relation.foreignKey,
+          relation.mappedBy,
+          relation.propertyKey,
+          relation.mappedBy
+        ))
+      }
+
+      for (const relation of sourceDefinition.relations.oneToMany) {
+        appendRelation('oneToMany', relation)
+      }
+      for (const relation of sourceDefinition.relations.manyToOne) {
+        appendRelation('manyToOne', relation)
+      }
+      for (const relation of sourceDefinition.relations.oneToOne) {
+        appendRelation('oneToOne', relation)
+      }
+    }
+
+    return concepts
   }
 }

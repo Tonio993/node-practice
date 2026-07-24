@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import knex, { Knex } from 'knex'
 import { SchemaManagementService } from '../src/shared/generic-entity/schema-management.service'
+import type { EngineEntityDefinition } from '../src/shared/generic-entity/engine-entity-definition'
 import { SchemaConceptDefinition, SchemaFieldDefinition, SchemaRelationDefinition } from '../src/shared/generic-entity/schema-definition'
 
 describe('schema management service', () => {
@@ -14,6 +15,28 @@ describe('schema management service', () => {
       }
       const columns = await db.raw(`PRAGMA index_info('${index.name}')`) as Array<{ name: string }>
       if (columns.some((column) => column.name === columnName)) {
+        return true
+      }
+    }
+
+    return false
+  }
+
+  const hasUniqueIndexOnColumns = async (tableName: string, columnNames: string[]): Promise<boolean> => {
+    const normalizedColumnNames = columnNames.map((columnName) => columnName.toLowerCase())
+    const indexes = await db.raw(`PRAGMA index_list('${tableName}')`) as Array<{ name: string; unique: number }>
+
+    for (const index of indexes) {
+      if (!index.unique) {
+        continue
+      }
+
+      const columns = await db.raw(`PRAGMA index_info('${index.name}')`) as Array<{ name: string }>
+      const orderedColumns = columns.map((column) => String(column.name).toLowerCase())
+      if (
+        orderedColumns.length === normalizedColumnNames.length
+        && normalizedColumnNames.every((columnName, idx) => orderedColumns[idx] === columnName)
+      ) {
         return true
       }
     }
@@ -221,5 +244,55 @@ describe('schema management service', () => {
 
     expect(hasProfileIdColumn).toBe(true)
     expect(hasUniqueIndex).toBe(true)
+  })
+
+  it('syncs schema from in-memory engine definitions and keeps composite unique constraints idempotent', async () => {
+    const definitions: EngineEntityDefinition[] = [
+      {
+        name: 'Order',
+        tableName: 'order_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            propertyKey: 'tenantId',
+            name: 'tenant_id',
+            type: 'string',
+            nullable: false,
+          },
+          {
+            propertyKey: 'externalCode',
+            name: 'external_code',
+            type: 'string',
+            nullable: false,
+          },
+        ],
+        tableConstraints: [
+          {
+            type: 'unique',
+            columns: ['tenant_id', 'external_code'],
+            name: 'order_tenant_external_unique',
+          },
+        ],
+        relations: {
+          oneToMany: [],
+          manyToOne: [],
+          oneToOne: [],
+        },
+      },
+    ]
+
+    const service = new SchemaManagementService(db)
+    await service.syncFromDefinitions(definitions)
+    await service.syncFromDefinitions(definitions)
+
+    const hasOrderTable = await db.schema.hasTable('order_table')
+    const hasTenantColumn = await db.schema.hasColumn('order_table', 'tenant_id')
+    const hasExternalCodeColumn = await db.schema.hasColumn('order_table', 'external_code')
+    const hasCompositeUnique = await hasUniqueIndexOnColumns('order_table', ['tenant_id', 'external_code'])
+
+    expect(hasOrderTable).toBe(true)
+    expect(hasTenantColumn).toBe(true)
+    expect(hasExternalCodeColumn).toBe(true)
+    expect(hasCompositeUnique).toBe(true)
   })
 })
