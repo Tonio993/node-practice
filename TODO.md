@@ -75,25 +75,35 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
     - annotato il modello di configurazione in `src/modules/concepts/concept.type.ts` tramite decorator `@Column`
     - aggiunto test di regression in `tests/generic-entity.decorator.test.ts` per il naming automatico (`table_name`, `primary_key`)
 
-2. Estendere la definizione canonica engine
+2. [COMPLETATO] Estendere la definizione canonica engine
+  - aggiungere colonne e vincoli tabella (inclusi unique compositi) alla definizione canonica
+  - mantenere compatibilità con `EngineEntityDefinitionAdapter.fromDecoratedEntity(...)` e con le definizioni da concept
+  - note implementative:
+    - introdotte interfacce `EngineColumnDefinition` ed `EngineTableConstraintDefinition`
+    - `EngineEntityDefinition` ora espone `columns` e `tableConstraints`
+    - `EngineEntityDefinitionAdapter.fromDecoratedEntity(...)` converte i metadati dei decorator in colonne e vincoli
+    - `EngineEntityDefinitionAdapter.fromConcepts(...)` converte anche i campi e vincoli delle definizioni di schema
+    - aggiunto test di integrazione in `tests/generic-entity.repository.engine.test.ts`
+
+3. Estendere lo schema manager per input in-memory
   - aggiungere colonne e vincoli tabella (almeno unique compositi)
   - mantenere compatibilità con `EngineEntityDefinitionAdapter.fromDecoratedEntity(...)` e con le definizioni da concept
 
-3. Estendere lo schema manager per input in-memory
+4. Estendere lo schema manager per input in-memory
   - aggiungere un metodo pubblico (es. `syncFromDefinitions(...)`) oltre a `syncFromConfiguration()`
   - riusare la stessa pipeline di apply DDL già presente (`ensureTable`, `ensureRelations`)
 
-4. Rifattorizzare il bootstrap in `src/db/knex.ts`
+5. Rifattorizzare il bootstrap in `src/db/knex.ts`
   - mantenere bootstrap minimo: creazione schema `concept_configuration`
   - generare le definizioni delle tabelle statiche (`concept`, `concept_field`, `concept_relation`) dalle entity
   - applicare le definizioni statiche tramite schema manager
   - eseguire poi `syncFromConfiguration()` per le tabelle dinamiche
 
-5. Aggiungere allineamento dati configurativi base (opzionale ma consigliato)
+6. Aggiungere allineamento dati configurativi base (opzionale ma consigliato)
   - seed idempotente per righe minime in `concept`, `concept_field`, `concept_relation`
   - utile per ambienti nuovi dove le tabelle statiche sono create ma il catalogo configurativo è vuoto
 
-6. Coprire i vincoli critici con test dedicati
+7. Coprire i vincoli critici con test dedicati
   - vincoli unique compositi delle tabelle di configurazione
   - gestione timestamps `created_at`/`updated_at`
   - coerenza naming camelCase/snake_case
