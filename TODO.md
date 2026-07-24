@@ -98,6 +98,11 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
 4. [COMPLETATO] Riuso pipeline DDL per sync in-memory
   - il nuovo ingresso `syncFromDefinitions(...)` riusa la stessa pipeline di apply (`ensureTable`, `ensureRelations`)
   - validazione: esecuzione ripetuta non genera duplicazioni di vincoli unique compositi
+  - note implementative:
+    - mantenuto un unico punto di orchestrazione nell'apply (`applyConceptDefinitions`) per garantire comportamento uniforme tra sync da configurazione e sync in-memory
+    - riuso dei metodi esistenti di DDL idempotente senza introdurre branch dedicati (`ensureTable`, `ensureRelations`, `ensureUniqueConstraints`)
+    - consolidata la risoluzione dei nomi colonna tramite `resolveFieldColumnName` per evitare divergenze tra mapping e alter table
+    - confermata la compatibilità su esecuzioni ripetute con test di regressione in `tests/schema-management.service.test.ts`
 
 5. Rifattorizzare il bootstrap in `src/db/knex.ts`
   - mantenere bootstrap minimo: creazione schema `concept_configuration`
@@ -193,6 +198,7 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - aggiunto test dedicato in `tests/schema-management.service.test.ts` per il percorso canonico
 
 ### Step 3. Normalizzare il modello delle relazioni
+- stato: [COMPLETATO]
 - definire una rappresentazione relazionale unica per il motore
 - evitare che il motore debba conoscere contemporaneamente:
   - relazioni bucketizzate (`oneToMany`, `manyToOne`, `oneToOne`)
@@ -206,6 +212,16 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - eventuale indicazione di ownership o derivabilità della FK
 - beneficio:
   - il motore DDL calcola una sola volta il contesto applicativo della relazione e non dipende dalla sorgente del dato
+- note implementative:
+  - introdotta normalizzazione centralizzata nel layer canonico (`CanonicalSchemaDefinitionAdapter.normalizeDefinitions`)
+  - normalizzazione applicata a:
+    - `relationType`
+    - `sourceEntity` / `targetEntity`
+    - `foreignKeyColumn`
+    - trimming dei campi opzionali (`mappedBy`, `sourceField`, `targetField`)
+  - deduplica delle relazioni canoniche duplicate per evitare doppia emissione DDL
+  - `SchemaManagementService.syncFromDefinitions(...)` ora forza la normalizzazione canonica prima del mapping interno
+  - aggiunti test dedicati in `tests/canonical-schema-definition.test.ts`
 
 ### Step 4. Separare il modello canonico dai modelli sorgente
 - mantenere `schema-definition.ts` come modello della configurazione persistita, non come modello operativo del motore
