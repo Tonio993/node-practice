@@ -1,10 +1,8 @@
 import { toCamelCase, toSnakeCase } from '../utils/case.util'
 import {
   CanonicalSchemaDefinition,
-  CanonicalSchemaDefinitionAdapter,
   CanonicalSchemaRelationDefinition,
 } from './canonical-schema-definition'
-import { SchemaConceptDefinition } from './schema-definition'
 import {
   getEntityColumns,
   getEntityMetadata,
@@ -79,11 +77,6 @@ export class EngineEntityDefinitionAdapter {
       columns: this.fromDecoratorColumns(entityClass),
       tableConstraints: (entityMetadata?.tableConstraints ?? []).map((constraint) => ({ ...constraint })),
     }
-  }
-
-  static fromConcepts(concepts: SchemaConceptDefinition[]): EngineEntityDefinition[] {
-    const canonicalDefinitions = CanonicalSchemaDefinitionAdapter.fromConcepts(concepts)
-    return this.fromCanonicalDefinitions(canonicalDefinitions)
   }
 
   static fromCanonicalDefinitions(definitions: CanonicalSchemaDefinition[]): EngineEntityDefinition[] {

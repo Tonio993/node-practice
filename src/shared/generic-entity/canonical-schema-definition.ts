@@ -9,7 +9,6 @@ import {
   hasEntityMetadata,
   Relation,
 } from './generic-entity.decorator'
-import { SchemaConceptDefinition, SchemaRelationDefinition } from './schema-definition'
 
 export type CanonicalSchemaRelationType = 'manyToOne' | 'oneToMany' | 'oneToOne' | 'unknown'
 
@@ -174,35 +173,6 @@ export class CanonicalSchemaDefinitionAdapter {
     return entityClasses.map((entityClass) => this.fromDecoratedEntity(entityClass))
   }
 
-  static fromConcepts(concepts: SchemaConceptDefinition[]): CanonicalSchemaDefinition[] {
-    const conceptsById = new Map<number, SchemaConceptDefinition>(concepts.map((concept) => [concept.id, concept]))
-
-    return this.normalizeDefinitions(concepts.map((concept) => ({
-      logicalName: concept.name,
-      tableName: concept.getResolvedTableName(),
-      tableSchema: concept.getResolvedTableSchema(),
-      columns: concept.fields.map((field) => ({
-        columnName: field.columnName ?? toSnakeCase(field.name),
-        dataType: field.type,
-        nullable: field.nullable,
-        unique: field.unique,
-        defaultValue: field.defaultValue,
-        primaryKey: field.primaryKey,
-        label: field.label,
-        description: field.description,
-        position: field.position,
-      })),
-      tableConstraints: concept.tableConstraints.map((constraint) => ({
-        type: constraint.type,
-        columns: [...constraint.columns],
-        name: constraint.name,
-      })),
-      relations: concept.relations
-        .map((relation) => this.fromConceptRelation(concept, relation, conceptsById))
-        .filter((relation): relation is CanonicalSchemaRelationDefinition => relation !== null),
-    })))
-  }
-
   static fromEngineDefinitions(definitions: EngineEntityDefinition[]): CanonicalSchemaDefinition[] {
     return this.normalizeDefinitions(definitions.map((definition) => ({
       logicalName: definition.name,
@@ -254,27 +224,6 @@ export class CanonicalSchemaDefinitionAdapter {
         targetField: relation.mappedBy,
       }
     })
-  }
-
-  private static fromConceptRelation(
-    sourceConcept: SchemaConceptDefinition,
-    relation: SchemaRelationDefinition,
-    conceptsById: Map<number, SchemaConceptDefinition>
-  ): CanonicalSchemaRelationDefinition | null {
-    const targetConcept = conceptsById.get(relation.targetConceptId)
-    if (!targetConcept) {
-      return null
-    }
-
-    return {
-      relationType: normalizeRelationType(relation.relationType),
-      sourceEntity: sourceConcept.getResolvedTableName(),
-      targetEntity: targetConcept.getResolvedTableName(),
-      foreignKeyColumn: toSnakeCase(String(relation.foreignKey || `${targetConcept.getResolvedTableName()}_id`)),
-      mappedBy: relation.mappedBy,
-      sourceField: relation.sourceField,
-      targetField: relation.targetField,
-    }
   }
 
   private static fromEngineRelations(

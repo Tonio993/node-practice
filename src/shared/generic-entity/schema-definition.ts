@@ -93,6 +93,10 @@ export class SchemaRelationDefinition {
   }
 }
 
+/**
+ * @deprecated Keep this model as persisted configuration representation.
+ * Use canonical schema definitions as the DDL operational model.
+ */
 export class SchemaConceptDefinition {
   constructor(
     public readonly id: number,

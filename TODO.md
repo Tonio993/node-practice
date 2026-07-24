@@ -413,6 +413,7 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - validazione finale: suite completa `npm run test:run` passata (32 test)
 
 ### Step 12. Deprecare gradualmente il modello operativo precedente
+- stato: [COMPLETATO]
 - una volta che il motore usa stabilmente il canonico:
   - ridurre progressivamente i punti in cui `SchemaConceptDefinition` viene usato come modello di lavoro
   - lasciare `SchemaConceptDefinition` e correlati come representation layer della configurazione
@@ -420,6 +421,12 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
     - modello canonico DDL
     - modello configurativo persistito
     - eventuale modello runtime repository
+- note implementative avviate:
+  - disaccoppiati gli adapter dal tipo concreto `SchemaConceptDefinition` con typing strutturale (`ConceptConfigurationLike`) in `canonical-schema-definition.ts`
+  - rimosso il bridge deprecato `EngineEntityDefinitionAdapter.fromConcepts(...)`; il percorso runtime usa `fromCanonicalDefinitions(...)`
+  - marcato `SchemaConceptDefinition` come `@deprecated` per uso operativo DDL/runtime, mantenendolo come representation layer
+  - eliminato il test di compatibilità del bridge legacy in `tests/generic-entity.repository.engine.test.ts`, mantenendo solo test canonico-first
+  - rimosso anche il bridge `CanonicalSchemaDefinitionAdapter.fromConcepts(...)`: la conversione configurazione -> canonico resta confinata al `SchemaManagementService`
 
 ### Ordine di implementazione consigliato
 1. definire la shape del modello canonico e le invarianti

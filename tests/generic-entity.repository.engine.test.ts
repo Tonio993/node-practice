@@ -4,10 +4,51 @@ import { GenericEntityRepository } from '../src/shared/generic-entity/generic-en
 import { EngineEntityDefinitionAdapter } from '../src/shared/generic-entity/engine-entity-definition'
 import { CanonicalSchemaDefinition } from '../src/shared/generic-entity/canonical-schema-definition'
 import { Column, Entity } from '../src/shared/generic-entity/generic-entity.decorator'
-import { SchemaConceptDefinition, SchemaRelationDefinition } from '../src/shared/generic-entity/schema-definition'
 
 describe('generic entity repository engine integration', () => {
   let db: Knex
+
+  const canonicalCompanyEmployeeDefinitions: CanonicalSchemaDefinition[] = [
+    {
+      logicalName: 'Company',
+      tableName: 'company',
+      tableSchema: 'concept_configuration',
+      columns: [
+        { columnName: 'name', dataType: 'string', nullable: false },
+      ],
+      tableConstraints: [],
+      relations: [
+        {
+          relationType: 'oneToMany',
+          sourceEntity: 'company',
+          targetEntity: 'employee',
+          foreignKeyColumn: 'company_id',
+          sourceField: 'employees',
+          targetField: 'company',
+        },
+      ],
+    },
+    {
+      logicalName: 'Employee',
+      tableName: 'employee',
+      tableSchema: 'concept_configuration',
+      columns: [
+        { columnName: 'name', dataType: 'string', nullable: false },
+        { columnName: 'company_id', dataType: 'integer', nullable: true },
+      ],
+      tableConstraints: [],
+      relations: [
+        {
+          relationType: 'manyToOne',
+          sourceEntity: 'employee',
+          targetEntity: 'company',
+          foreignKeyColumn: 'company_id',
+          sourceField: 'company',
+          targetField: 'employees',
+        },
+      ],
+    },
+  ]
 
   beforeEach(async () => {
     db = knex({
@@ -44,8 +85,7 @@ describe('generic entity repository engine integration', () => {
       { name: 'Carla', company_id: companyBId },
     ])
 
-    const concepts = buildCompanyEmployeeConcepts()
-    const engineDefinitions = EngineEntityDefinitionAdapter.fromConcepts(concepts)
+    const engineDefinitions = EngineEntityDefinitionAdapter.fromCanonicalDefinitions(canonicalCompanyEmployeeDefinitions)
 
     const companyDefinition = engineDefinitions.find((definition) => definition.tableName === 'company')
     const employeeDefinition = engineDefinitions.find((definition) => definition.tableName === 'employee')
@@ -75,8 +115,7 @@ describe('generic entity repository engine integration', () => {
   it('persists many-to-one relation payload using engine metadata', async () => {
     const [companyId] = await db('company').insert({ name: 'Company A' }) as number[]
 
-    const concepts = buildCompanyEmployeeConcepts()
-    const engineDefinitions = EngineEntityDefinitionAdapter.fromConcepts(concepts)
+    const engineDefinitions = EngineEntityDefinitionAdapter.fromCanonicalDefinitions(canonicalCompanyEmployeeDefinitions)
     const employeeDefinition = engineDefinitions.find((definition) => definition.tableName === 'employee')
 
     expect(employeeDefinition).toBeDefined()
@@ -137,49 +176,7 @@ describe('generic entity repository engine integration', () => {
   })
 
   it('projects canonical definitions into runtime engine buckets', () => {
-    const canonicalDefinitions: CanonicalSchemaDefinition[] = [
-      {
-        logicalName: 'Company',
-        tableName: 'company',
-        tableSchema: 'concept_configuration',
-        columns: [
-          { columnName: 'name', dataType: 'string', nullable: false },
-        ],
-        tableConstraints: [],
-        relations: [
-          {
-            relationType: 'oneToMany',
-            sourceEntity: 'company',
-            targetEntity: 'employee',
-            foreignKeyColumn: 'company_id',
-            sourceField: 'employees',
-            targetField: 'company',
-          },
-        ],
-      },
-      {
-        logicalName: 'Employee',
-        tableName: 'employee',
-        tableSchema: 'concept_configuration',
-        columns: [
-          { columnName: 'name', dataType: 'string', nullable: false },
-          { columnName: 'company_id', dataType: 'integer', nullable: true },
-        ],
-        tableConstraints: [],
-        relations: [
-          {
-            relationType: 'manyToOne',
-            sourceEntity: 'employee',
-            targetEntity: 'company',
-            foreignKeyColumn: 'company_id',
-            sourceField: 'company',
-            targetField: 'employees',
-          },
-        ],
-      },
-    ]
-
-    const runtimeDefinitions = EngineEntityDefinitionAdapter.fromCanonicalDefinitions(canonicalDefinitions)
+    const runtimeDefinitions = EngineEntityDefinitionAdapter.fromCanonicalDefinitions(canonicalCompanyEmployeeDefinitions)
     const companyDefinition = runtimeDefinitions.find((definition) => definition.tableName === 'company')
     const employeeDefinition = runtimeDefinitions.find((definition) => definition.tableName === 'employee')
 
@@ -203,47 +200,3 @@ describe('generic entity repository engine integration', () => {
     })
   })
 })
-
-function buildCompanyEmployeeConcepts(): SchemaConceptDefinition[] {
-  const companyConcept = new SchemaConceptDefinition(
-    1,
-    'Company',
-    'company',
-    null,
-    [],
-    [
-      new SchemaRelationDefinition(
-        1,
-        1,
-        2,
-        'oneToMany',
-        'company_id',
-        'company',
-        'employees',
-        'company'
-      ),
-    ]
-  )
-
-  const employeeConcept = new SchemaConceptDefinition(
-    2,
-    'Employee',
-    'employee',
-    null,
-    [],
-    [
-      new SchemaRelationDefinition(
-        2,
-        2,
-        1,
-        'manyToOne',
-        'company_id',
-        'employees',
-        'company',
-        'employees'
-      ),
-    ]
-  )
-
-  return [companyConcept, employeeConcept]
-}
