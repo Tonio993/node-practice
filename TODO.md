@@ -310,6 +310,7 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - mantenuto `syncFromConfiguration()` come secondo passaggio per la sincronizzazione delle tabelle dinamiche
 
 ### Step 9. Introdurre supporto esplicito al compare/diff
+- stato: [COMPLETATO]
 - una volta ottenuto il modello canonico, aggiungere una fase esplicita di confronto tra:
   - stato desiderato
   - stato reale del database
@@ -319,6 +320,45 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - rilevazione vincoli mancanti
   - rilevazione differenze di tipo o nullability
   - pianificazione di alter safe vs destructive
+- piano di esecuzione suddiviso:
+  - fase 1: report read-only su tabelle/colonne/vincoli/colonne relazione mancanti
+  - fase 2: estendere il report con classificazione safe vs destructive
+  - fase 3: integrare il report nel flusso di sync (dry-run e guardrail)
+- note implementative (fase 1):
+  - aggiunta API pubblica `compareDefinitions(...)` in `SchemaManagementService`
+  - aggiunta API pubblica `compareFromConfiguration(...)` per il confronto diretto da catalogo
+  - introdotto `SchemaDiffReport` con sezioni:
+    - `missingTables`
+    - `missingColumns`
+    - `columnTypeMismatches`
+    - `columnNullabilityMismatches`
+    - `missingUniqueConstraints`
+    - `missingRelationColumns`
+- note implementative (fase 2):
+  - esteso `SchemaDiffReport` con `plan` per classificare le azioni di remediation
+  - introdotti tipi espliciti per piano di azione:
+    - `SchemaDiffPlannedAction`
+    - `SchemaDiffActionKind`
+    - `SchemaDiffRiskLevel` (`safe`/`destructive`)
+    - `SchemaDiffSeverity`
+  - classificazione automatica implementata:
+    - `safe`: create table, add column, add unique constraint, add relation column
+    - `destructive`: alter type, tighten nullability (`NULL -> NOT NULL`)
+  - aggiunto `summary` con conteggi `totalActions`, `safeActions`, `destructiveActions`
+  - estesi test in `tests/schema-management.service.test.ts` per verifica classificazione
+  - aggiunta introspezione cross-engine (sqlite/postgres) per metadati colonna
+  - aggiunto test dedicato in `tests/schema-management.service.test.ts`
+- note implementative (fase 3):
+  - integrazione del compare/diff nel flusso sync con API operative:
+    - `syncFromDefinitionsWithPlan(...)`
+    - `syncFromConfigurationWithPlan(...)`
+  - introdotte opzioni di esecuzione:
+    - `dryRun`: produce report senza applicare DDL
+    - `failOnDestructive`: interrompe la sync in presenza di azioni destructive
+  - introdotto `SchemaSyncExecutionResult` (`applied` + `report`) per consumare l'esito in modo strutturato
+  - introdotto errore tipizzato `SchemaSyncGuardError` per i blocchi guardrail
+  - mantenuta retrocompatibilità delle API esistenti (`syncFromDefinitions`, `syncFromConfiguration`) che ora delegano al nuovo flusso
+  - aggiunti test dedicati per dry-run e guardrail destructive in `tests/schema-management.service.test.ts`
 
 ### Step 10. Formalizzare i limiti sulle operazioni distruttive
 - prima di introdurre `drop`, `rename` o alter distruttivi, definire policy esplicite:

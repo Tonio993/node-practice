@@ -3,26 +3,303 @@ import { toSnakeCase } from '../utils/case.util'
 import {
   CanonicalSchemaColumnDefinition,
   CanonicalSchemaDefinition,
+  CanonicalSchemaConstraintDefinition,
   CanonicalSchemaDefinitionAdapter,
   CanonicalSchemaRelationDefinition,
   CanonicalSchemaRelationType,
 } from './canonical-schema-definition'
 
+export interface SchemaColumnDiff {
+  schemaName: string
+  tableName: string
+  columnName: string
+  expectedType?: string
+  actualType?: string
+  expectedNullable?: boolean
+  actualNullable?: boolean
+}
+
+export interface SchemaConstraintDiff {
+  schemaName: string
+  tableName: string
+  constraintName?: string
+  columns: string[]
+}
+
+export interface SchemaRelationDiff {
+  ownerSchemaName: string
+  ownerTableName: string
+  reference: string
+  columnName: string
+  unique: boolean
+}
+
+export interface SchemaDiffReport {
+  missingTables: Array<{ schemaName: string; tableName: string; logicalName: string }>
+  missingColumns: SchemaColumnDiff[]
+  columnTypeMismatches: SchemaColumnDiff[]
+  columnNullabilityMismatches: SchemaColumnDiff[]
+  missingUniqueConstraints: SchemaConstraintDiff[]
+  missingRelationColumns: SchemaRelationDiff[]
+  plan: SchemaDiffPlan
+}
+
+export type SchemaDiffActionKind =
+  | 'createTable'
+  | 'addColumn'
+  | 'alterColumnType'
+  | 'alterColumnNullability'
+  | 'addUniqueConstraint'
+  | 'addRelationColumn'
+
+export type SchemaDiffRiskLevel = 'safe' | 'destructive'
+export type SchemaDiffSeverity = 'info' | 'warning' | 'error'
+
+export interface SchemaDiffPlannedAction {
+  kind: SchemaDiffActionKind
+  risk: SchemaDiffRiskLevel
+  severity: SchemaDiffSeverity
+  schemaName: string
+  tableName: string
+  target: string
+  reason: string
+}
+
+export interface SchemaDiffPlan {
+  safeActions: SchemaDiffPlannedAction[]
+  destructiveActions: SchemaDiffPlannedAction[]
+  summary: {
+    totalActions: number
+    safeActions: number
+    destructiveActions: number
+  }
+}
+
+export interface SchemaSyncOptions {
+  dryRun?: boolean
+  failOnDestructive?: boolean
+}
+
+export interface SchemaSyncExecutionResult {
+  applied: boolean
+  report: SchemaDiffReport
+}
+
+export class SchemaSyncGuardError extends Error {
+  constructor(public readonly report: SchemaDiffReport) {
+    super('Destructive schema changes detected. Sync aborted by guardrail policy.')
+    this.name = 'SchemaSyncGuardError'
+  }
+}
+
 export class SchemaManagementService {
   constructor(private readonly db: Knex) {}
 
-  async syncFromConfiguration(): Promise<void> {
-    const definitions = await this.loadCanonicalDefinitionsFromConfiguration()
-    await this.applyCanonicalDefinitions(definitions)
+  private createEmptyPlan(): SchemaDiffPlan {
+    return {
+      safeActions: [],
+      destructiveActions: [],
+      summary: {
+        totalActions: 0,
+        safeActions: 0,
+        destructiveActions: 0,
+      },
+    }
   }
 
-  async syncFromDefinitions(definitions: CanonicalSchemaDefinition[]): Promise<void> {
+  async compareFromConfiguration(): Promise<SchemaDiffReport> {
+    const definitions = await this.loadCanonicalDefinitionsFromConfiguration()
+    return this.compareDefinitions(definitions)
+  }
+
+  async syncFromConfigurationWithPlan(options: SchemaSyncOptions = {}): Promise<SchemaSyncExecutionResult> {
+    const definitions = await this.loadCanonicalDefinitionsFromConfiguration()
+    return this.syncCanonicalDefinitions(definitions, options)
+  }
+
+  async syncFromDefinitionsWithPlan(
+    definitions: CanonicalSchemaDefinition[],
+    options: SchemaSyncOptions = {}
+  ): Promise<SchemaSyncExecutionResult> {
+    return this.syncCanonicalDefinitions(definitions, options)
+  }
+
+  async compareDefinitions(definitions: CanonicalSchemaDefinition[]): Promise<SchemaDiffReport> {
+    const report: SchemaDiffReport = {
+      missingTables: [],
+      missingColumns: [],
+      columnTypeMismatches: [],
+      columnNullabilityMismatches: [],
+      missingUniqueConstraints: [],
+      missingRelationColumns: [],
+      plan: this.createEmptyPlan(),
+    }
+
     if (definitions.length === 0) {
-      return
+      return report
     }
 
     const normalizedDefinitions = CanonicalSchemaDefinitionAdapter.normalizeDefinitions(definitions)
+    const definitionsByTable = this.groupDefinitionsByTableName(normalizedDefinitions)
+
+    for (const definition of normalizedDefinitions) {
+      const schemaName = this.resolveSchemaName(definition.tableSchema)
+      const tableName = definition.tableName
+      const schemaBuilder = this.getSchemaBuilder(schemaName)
+      const exists = await schemaBuilder.hasTable(tableName)
+
+      if (!exists) {
+        report.missingTables.push({
+          schemaName,
+          tableName,
+          logicalName: definition.logicalName,
+        })
+        continue
+      }
+
+      const existingColumns = await this.getExistingColumns(schemaName, tableName)
+      for (const column of definition.columns) {
+        const expectedType = this.normalizeExpectedType(column)
+        const existingColumn = existingColumns.get(column.columnName.toLowerCase())
+
+        if (!existingColumn) {
+          report.missingColumns.push({
+            schemaName,
+            tableName,
+            columnName: column.columnName,
+            expectedType,
+            expectedNullable: this.resolveExpectedNullable(column),
+          })
+          continue
+        }
+
+        if (expectedType !== existingColumn.normalizedType) {
+          report.columnTypeMismatches.push({
+            schemaName,
+            tableName,
+            columnName: column.columnName,
+            expectedType,
+            actualType: existingColumn.normalizedType,
+          })
+        }
+
+        const expectedNullable = this.resolveExpectedNullable(column)
+        if (expectedNullable !== existingColumn.nullable) {
+          report.columnNullabilityMismatches.push({
+            schemaName,
+            tableName,
+            columnName: column.columnName,
+            expectedNullable,
+            actualNullable: existingColumn.nullable,
+          })
+        }
+      }
+
+      const uniqueConstraints = this.getUniqueConstraints(definition.tableConstraints)
+      for (const constraint of uniqueConstraints) {
+        const alreadyExists = await this.hasUniqueConstraint(schemaName, tableName, constraint.columns, constraint.name)
+        if (!alreadyExists) {
+          report.missingUniqueConstraints.push({
+            schemaName,
+            tableName,
+            constraintName: constraint.name,
+            columns: [...constraint.columns],
+          })
+        }
+      }
+    }
+
+    for (const definition of normalizedDefinitions) {
+      for (const relation of definition.relations) {
+        if (relation.sourceEntity !== definition.tableName) {
+          continue
+        }
+
+        const relationContext = this.resolveRelationContext(relation, definition, definitionsByTable)
+        if (!relationContext) {
+          continue
+        }
+
+        const ownerSchemaBuilder = this.getSchemaBuilder(relationContext.ownerSchemaName)
+        const hasColumn = await ownerSchemaBuilder.hasColumn(relationContext.ownerTableName, relationContext.columnName)
+        if (!hasColumn) {
+          report.missingRelationColumns.push({
+            ownerSchemaName: relationContext.ownerSchemaName,
+            ownerTableName: relationContext.ownerTableName,
+            reference: relationContext.reference,
+            columnName: relationContext.columnName,
+            unique: relationContext.unique,
+          })
+          continue
+        }
+
+        if (relationContext.unique) {
+          const uniqueExists = await this.hasUniqueConstraint(
+            relationContext.ownerSchemaName,
+            relationContext.ownerTableName,
+            [relationContext.columnName]
+          )
+          if (!uniqueExists) {
+            report.missingUniqueConstraints.push({
+              schemaName: relationContext.ownerSchemaName,
+              tableName: relationContext.ownerTableName,
+              columns: [relationContext.columnName],
+            })
+          }
+        }
+      }
+    }
+
+    report.plan = this.buildDiffPlan(report)
+    return report
+  }
+
+  async syncFromConfiguration(): Promise<void> {
+    await this.syncFromConfigurationWithPlan()
+  }
+
+  async syncFromDefinitions(definitions: CanonicalSchemaDefinition[]): Promise<void> {
+    await this.syncFromDefinitionsWithPlan(definitions)
+  }
+
+  private async syncCanonicalDefinitions(
+    definitions: CanonicalSchemaDefinition[],
+    options: SchemaSyncOptions = {}
+  ): Promise<SchemaSyncExecutionResult> {
+    if (definitions.length === 0) {
+      return {
+        applied: false,
+        report: {
+          missingTables: [],
+          missingColumns: [],
+          columnTypeMismatches: [],
+          columnNullabilityMismatches: [],
+          missingUniqueConstraints: [],
+          missingRelationColumns: [],
+          plan: this.createEmptyPlan(),
+        },
+      }
+    }
+
+    const normalizedDefinitions = CanonicalSchemaDefinitionAdapter.normalizeDefinitions(definitions)
+    const report = await this.compareDefinitions(normalizedDefinitions)
+
+    if (options.failOnDestructive && report.plan.destructiveActions.length > 0) {
+      throw new SchemaSyncGuardError(report)
+    }
+
+    if (options.dryRun) {
+      return {
+        applied: false,
+        report,
+      }
+    }
+
     await this.applyCanonicalDefinitions(normalizedDefinitions)
+    return {
+      applied: true,
+      report,
+    }
   }
 
   private async applyCanonicalDefinitions(definitions: CanonicalSchemaDefinition[]): Promise<void> {
@@ -327,6 +604,208 @@ export class SchemaManagementService {
     }
 
     return tableName
+  }
+
+  private normalizeExpectedType(column: CanonicalSchemaColumnDefinition): string {
+    const normalized = String(column.dataType || '').trim().toLowerCase()
+    if (normalized === 'string' || normalized === 'varchar' || normalized === 'text' || normalized === 'character varying') {
+      return 'string'
+    }
+    if (normalized === 'integer' || normalized === 'int' || normalized === 'int4' || normalized === 'bigint' || normalized === 'int8') {
+      return 'integer'
+    }
+    if (normalized === 'boolean' || normalized === 'bool') {
+      return 'boolean'
+    }
+    if (normalized === 'date') {
+      return 'date'
+    }
+    if (normalized === 'datetime' || normalized === 'timestamp' || normalized === 'timestamp without time zone') {
+      return 'datetime'
+    }
+    if (normalized === 'json' || normalized === 'jsonb') {
+      return 'json'
+    }
+    if (normalized === 'decimal' || normalized === 'float' || normalized === 'number' || normalized === 'real' || normalized === 'numeric') {
+      return 'float'
+    }
+
+    return normalized || 'string'
+  }
+
+  private resolveExpectedNullable(column: CanonicalSchemaColumnDefinition): boolean {
+    if (column.primaryKey) {
+      return false
+    }
+
+    return column.nullable !== false
+  }
+
+  private normalizeActualType(value: unknown): string {
+    const normalized = String(value || '').trim().toLowerCase()
+    if (normalized.includes('char') || normalized.includes('text')) {
+      return 'string'
+    }
+    if (normalized === 'integer' || normalized === 'int' || normalized === 'int4' || normalized === 'bigint' || normalized === 'int8') {
+      return 'integer'
+    }
+    if (normalized === 'boolean' || normalized === 'bool') {
+      return 'boolean'
+    }
+    if (normalized === 'date') {
+      return 'date'
+    }
+    if (normalized.includes('timestamp') || normalized.includes('datetime')) {
+      return 'datetime'
+    }
+    if (normalized === 'json' || normalized === 'jsonb') {
+      return 'json'
+    }
+    if (normalized === 'real' || normalized === 'numeric' || normalized === 'decimal' || normalized === 'float' || normalized === 'double precision') {
+      return 'float'
+    }
+
+    return normalized || 'string'
+  }
+
+  private getUniqueConstraints(constraints: CanonicalSchemaConstraintDefinition[]): CanonicalSchemaConstraintDefinition[] {
+    return constraints.filter((constraint) => constraint.type === 'unique' && constraint.columns.length > 0)
+  }
+
+  private async getExistingColumns(
+    schemaName: string,
+    tableName: string
+  ): Promise<Map<string, { normalizedType: string; nullable: boolean }>> {
+    const client = String(this.db.client.config.client || '').toLowerCase()
+    const columns = new Map<string, { normalizedType: string; nullable: boolean }>()
+
+    if (client.includes('sqlite')) {
+      const rows = await this.db.raw(`PRAGMA table_info('${tableName}')`) as Array<{
+        name: string
+        type: string
+        notnull: number
+      }>
+
+      for (const row of rows) {
+        columns.set(String(row.name).toLowerCase(), {
+          normalizedType: this.normalizeActualType(row.type),
+          nullable: Number(row.notnull) === 0,
+        })
+      }
+
+      return columns
+    }
+
+    const rows = await this.db
+      .select('column_name as columnName', 'data_type as dataType', 'is_nullable as isNullable')
+      .from('information_schema.columns')
+      .where('table_schema', schemaName)
+      .andWhere('table_name', tableName)
+
+    for (const row of rows as Array<{ columnName: string; dataType: string; isNullable: string }>) {
+      columns.set(String(row.columnName).toLowerCase(), {
+        normalizedType: this.normalizeActualType(row.dataType),
+        nullable: String(row.isNullable).toUpperCase() === 'YES',
+      })
+    }
+
+    return columns
+  }
+
+  private buildDiffPlan(report: SchemaDiffReport): SchemaDiffPlan {
+    const safeActions: SchemaDiffPlannedAction[] = []
+    const destructiveActions: SchemaDiffPlannedAction[] = []
+
+    for (const table of report.missingTables) {
+      safeActions.push({
+        kind: 'createTable',
+        risk: 'safe',
+        severity: 'warning',
+        schemaName: table.schemaName,
+        tableName: table.tableName,
+        target: table.tableName,
+        reason: `Table ${table.tableName} is missing and should be created`,
+      })
+    }
+
+    for (const column of report.missingColumns) {
+      safeActions.push({
+        kind: 'addColumn',
+        risk: 'safe',
+        severity: 'warning',
+        schemaName: column.schemaName,
+        tableName: column.tableName,
+        target: column.columnName,
+        reason: `Column ${column.columnName} is missing`,
+      })
+    }
+
+    for (const constraint of report.missingUniqueConstraints) {
+      safeActions.push({
+        kind: 'addUniqueConstraint',
+        risk: 'safe',
+        severity: 'warning',
+        schemaName: constraint.schemaName,
+        tableName: constraint.tableName,
+        target: constraint.constraintName ?? constraint.columns.join(','),
+        reason: `Unique constraint on columns ${constraint.columns.join(', ')} is missing`,
+      })
+    }
+
+    for (const relation of report.missingRelationColumns) {
+      safeActions.push({
+        kind: 'addRelationColumn',
+        risk: 'safe',
+        severity: 'warning',
+        schemaName: relation.ownerSchemaName,
+        tableName: relation.ownerTableName,
+        target: relation.columnName,
+        reason: `Relation foreign key column ${relation.columnName} is missing`,
+      })
+    }
+
+    for (const mismatch of report.columnTypeMismatches) {
+      destructiveActions.push({
+        kind: 'alterColumnType',
+        risk: 'destructive',
+        severity: 'error',
+        schemaName: mismatch.schemaName,
+        tableName: mismatch.tableName,
+        target: mismatch.columnName,
+        reason: `Column type mismatch (${mismatch.actualType} -> ${mismatch.expectedType}) may require destructive migration`,
+      })
+    }
+
+    for (const mismatch of report.columnNullabilityMismatches) {
+      const shouldTightenNullability = mismatch.expectedNullable === false && mismatch.actualNullable === true
+      const action: SchemaDiffPlannedAction = {
+        kind: 'alterColumnNullability',
+        risk: shouldTightenNullability ? 'destructive' : 'safe',
+        severity: shouldTightenNullability ? 'error' : 'warning',
+        schemaName: mismatch.schemaName,
+        tableName: mismatch.tableName,
+        target: mismatch.columnName,
+        reason: shouldTightenNullability
+          ? `Making column ${mismatch.columnName} NOT NULL may fail if null rows exist`
+          : `Column ${mismatch.columnName} can be relaxed to nullable`,
+      }
+
+      if (shouldTightenNullability) {
+        destructiveActions.push(action)
+      } else {
+        safeActions.push(action)
+      }
+    }
+
+    return {
+      safeActions,
+      destructiveActions,
+      summary: {
+        totalActions: safeActions.length + destructiveActions.length,
+        safeActions: safeActions.length,
+        destructiveActions: destructiveActions.length,
+      },
+    }
   }
 
   private applyColumns(table: Knex.CreateTableBuilder, columns: CanonicalSchemaColumnDefinition[]): void {

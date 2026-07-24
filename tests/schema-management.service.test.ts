@@ -1,6 +1,9 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import knex, { Knex } from 'knex'
-import { SchemaManagementService } from '../src/shared/generic-entity/schema-management.service'
+import {
+  SchemaManagementService,
+  SchemaSyncGuardError,
+} from '../src/shared/generic-entity/schema-management.service'
 import { CanonicalSchemaDefinition, CanonicalSchemaDefinitionAdapter } from '../src/shared/generic-entity/canonical-schema-definition'
 import type { EngineEntityDefinition } from '../src/shared/generic-entity/engine-entity-definition'
 
@@ -359,5 +362,235 @@ describe('schema management service', () => {
     expect(hasTenantColumn).toBe(true)
     expect(hasInvoiceNumberColumn).toBe(true)
     expect(hasCompositeUnique).toBe(true)
+  })
+
+  it('compares desired canonical schema with database and reports structural diffs', async () => {
+    await db.schema.createTable('customer_table', (table) => {
+      table.increments('id').notNullable()
+      table.string('name').notNullable()
+    })
+
+    await db.schema.createTable('invoice_table', (table) => {
+      table.increments('id').notNullable()
+      table.integer('tenant_id').nullable()
+    })
+
+    const definitions: CanonicalSchemaDefinition[] = [
+      {
+        logicalName: 'Invoice',
+        tableName: 'invoice_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            columnName: 'tenant_id',
+            dataType: 'string',
+            nullable: false,
+          },
+          {
+            columnName: 'invoice_number',
+            dataType: 'string',
+            nullable: false,
+          },
+        ],
+        tableConstraints: [
+          {
+            type: 'unique',
+            columns: ['tenant_id', 'invoice_number'],
+            name: 'invoice_tenant_number_unique',
+          },
+        ],
+        relations: [
+          {
+            relationType: 'manyToOne',
+            sourceEntity: 'invoice_table',
+            targetEntity: 'customer_table',
+            foreignKeyColumn: 'customer_id',
+          },
+        ],
+      },
+      {
+        logicalName: 'MissingEntity',
+        tableName: 'missing_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            columnName: 'name',
+            dataType: 'string',
+            nullable: false,
+          },
+        ],
+        tableConstraints: [],
+        relations: [],
+      },
+      {
+        logicalName: 'Customer',
+        tableName: 'customer_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            columnName: 'name',
+            dataType: 'string',
+            nullable: false,
+          },
+        ],
+        tableConstraints: [],
+        relations: [],
+      },
+    ]
+
+    const service = new SchemaManagementService(db)
+    const report = await service.compareDefinitions(definitions)
+
+    expect(report.missingTables).toContainEqual({
+      schemaName: 'concept_configuration',
+      tableName: 'missing_table',
+      logicalName: 'MissingEntity',
+    })
+
+    expect(report.missingColumns).toContainEqual(expect.objectContaining({
+      schemaName: 'concept_configuration',
+      tableName: 'invoice_table',
+      columnName: 'invoice_number',
+      expectedType: 'string',
+      expectedNullable: false,
+    }))
+
+    expect(report.columnTypeMismatches).toContainEqual(expect.objectContaining({
+      schemaName: 'concept_configuration',
+      tableName: 'invoice_table',
+      columnName: 'tenant_id',
+      expectedType: 'string',
+      actualType: 'integer',
+    }))
+
+    expect(report.columnNullabilityMismatches).toContainEqual(expect.objectContaining({
+      schemaName: 'concept_configuration',
+      tableName: 'invoice_table',
+      columnName: 'tenant_id',
+      expectedNullable: false,
+      actualNullable: true,
+    }))
+
+    expect(report.missingUniqueConstraints).toContainEqual(expect.objectContaining({
+      schemaName: 'concept_configuration',
+      tableName: 'invoice_table',
+      constraintName: 'invoice_tenant_number_unique',
+      columns: ['tenant_id', 'invoice_number'],
+    }))
+
+    expect(report.missingRelationColumns).toContainEqual(expect.objectContaining({
+      ownerSchemaName: 'concept_configuration',
+      ownerTableName: 'invoice_table',
+      reference: 'customer_table',
+      columnName: 'customer_id',
+      unique: false,
+    }))
+
+    expect(report.plan.safeActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'createTable',
+        risk: 'safe',
+        tableName: 'missing_table',
+      }),
+      expect.objectContaining({
+        kind: 'addColumn',
+        risk: 'safe',
+        tableName: 'invoice_table',
+        target: 'invoice_number',
+      }),
+      expect.objectContaining({
+        kind: 'addRelationColumn',
+        risk: 'safe',
+        tableName: 'invoice_table',
+        target: 'customer_id',
+      }),
+    ]))
+
+    expect(report.plan.destructiveActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'alterColumnType',
+        risk: 'destructive',
+        tableName: 'invoice_table',
+        target: 'tenant_id',
+      }),
+      expect.objectContaining({
+        kind: 'alterColumnNullability',
+        risk: 'destructive',
+        tableName: 'invoice_table',
+        target: 'tenant_id',
+      }),
+    ]))
+
+    expect(report.plan.summary.totalActions).toBe(
+      report.plan.summary.safeActions + report.plan.summary.destructiveActions
+    )
+    expect(report.plan.summary.destructiveActions).toBeGreaterThan(0)
+  })
+
+  it('supports dry-run sync without applying schema changes', async () => {
+    const definitions: CanonicalSchemaDefinition[] = [
+      {
+        logicalName: 'DryRunEntity',
+        tableName: 'dry_run_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            columnName: 'name',
+            dataType: 'string',
+            nullable: false,
+          },
+        ],
+        tableConstraints: [],
+        relations: [],
+      },
+    ]
+
+    const service = new SchemaManagementService(db)
+    const result = await service.syncFromDefinitionsWithPlan(definitions, { dryRun: true })
+
+    const hasTable = await db.schema.hasTable('dry_run_table')
+    expect(hasTable).toBe(false)
+    expect(result.applied).toBe(false)
+    expect(result.report.missingTables).toContainEqual(expect.objectContaining({
+      tableName: 'dry_run_table',
+    }))
+  })
+
+  it('blocks sync when destructive diffs are detected and guardrail is enabled', async () => {
+    await db.schema.createTable('guarded_table', (table) => {
+      table.increments('id').notNullable()
+      table.integer('tenant_id').nullable()
+    })
+
+    const definitions: CanonicalSchemaDefinition[] = [
+      {
+        logicalName: 'Guarded',
+        tableName: 'guarded_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            columnName: 'tenant_id',
+            dataType: 'string',
+            nullable: false,
+          },
+          {
+            columnName: 'external_code',
+            dataType: 'string',
+            nullable: false,
+          },
+        ],
+        tableConstraints: [],
+        relations: [],
+      },
+    ]
+
+    const service = new SchemaManagementService(db)
+
+    await expect(service.syncFromDefinitionsWithPlan(definitions, { failOnDestructive: true }))
+      .rejects
+      .toBeInstanceOf(SchemaSyncGuardError)
+
+    const hasExternalCodeColumn = await db.schema.hasColumn('guarded_table', 'external_code')
+    expect(hasExternalCodeColumn).toBe(false)
   })
 })
