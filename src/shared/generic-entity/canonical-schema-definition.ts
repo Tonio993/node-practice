@@ -129,17 +129,6 @@ function normalizeDefinition(definition: CanonicalSchemaDefinition): CanonicalSc
   }
 }
 
-export function isCanonicalSchemaDefinitionArray(
-  definitions: EngineEntityDefinition[] | CanonicalSchemaDefinition[]
-): definitions is CanonicalSchemaDefinition[] {
-  if (definitions.length === 0) {
-    return false
-  }
-
-  const first = definitions[0] as Partial<CanonicalSchemaDefinition>
-  return typeof first.logicalName === 'string' && Array.isArray(first.relations)
-}
-
 export class CanonicalSchemaDefinitionAdapter {
   static normalizeDefinitions(definitions: CanonicalSchemaDefinition[]): CanonicalSchemaDefinition[] {
     return definitions.map((definition) => normalizeDefinition(definition))
