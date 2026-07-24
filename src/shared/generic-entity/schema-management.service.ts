@@ -1,148 +1,239 @@
 import type { Knex } from 'knex'
 import { toSnakeCase } from '../utils/case.util'
 import {
+  CanonicalSchemaColumnDefinition,
   CanonicalSchemaDefinition,
   CanonicalSchemaDefinitionAdapter,
-  isCanonicalSchemaDefinitionArray,
+  CanonicalSchemaRelationDefinition,
+  CanonicalSchemaRelationType,
 } from './canonical-schema-definition'
-import type { EngineEntityDefinition } from './engine-entity-definition'
-import { SchemaConceptDefinition, SchemaFieldDefinition, SchemaRelationDefinition } from './schema-definition'
 
 export class SchemaManagementService {
   constructor(private readonly db: Knex) {}
 
   async syncFromConfiguration(): Promise<void> {
-    const concepts = await this.loadConceptDefinitions()
-    await this.applyConceptDefinitions(concepts)
+    const definitions = await this.loadCanonicalDefinitionsFromConfiguration()
+    await this.applyCanonicalDefinitions(definitions)
   }
 
-  async syncFromDefinitions(definitions: EngineEntityDefinition[] | CanonicalSchemaDefinition[]): Promise<void> {
+  async syncFromDefinitions(definitions: CanonicalSchemaDefinition[]): Promise<void> {
     if (definitions.length === 0) {
       return
     }
 
-    const canonicalDefinitions = isCanonicalSchemaDefinitionArray(definitions)
-      ? definitions
-      : CanonicalSchemaDefinitionAdapter.fromEngineDefinitions(definitions)
-    const normalizedDefinitions = CanonicalSchemaDefinitionAdapter.normalizeDefinitions(canonicalDefinitions)
-
-    const concepts = this.mapCanonicalDefinitionsToConceptDefinitions(normalizedDefinitions)
-    await this.applyConceptDefinitions(concepts)
+    const normalizedDefinitions = CanonicalSchemaDefinitionAdapter.normalizeDefinitions(definitions)
+    await this.applyCanonicalDefinitions(normalizedDefinitions)
   }
 
-  private async applyConceptDefinitions(concepts: SchemaConceptDefinition[]): Promise<void> {
-    const conceptsById = new Map(concepts.map((concept) => [concept.id, concept]))
+  private async applyCanonicalDefinitions(definitions: CanonicalSchemaDefinition[]): Promise<void> {
+    const definitionsByTable = this.groupDefinitionsByTableName(definitions)
 
-    for (const concept of concepts) {
-      await this.ensureTable(concept)
+    for (const definition of definitions) {
+      await this.ensureTable(definition)
     }
 
-    for (const concept of concepts) {
-      await this.ensureRelations(concept, conceptsById)
+    for (const definition of definitions) {
+      await this.ensureRelations(definition, definitionsByTable)
     }
   }
 
-  private async loadConceptDefinitions(): Promise<SchemaConceptDefinition[]> {
+  private async loadCanonicalDefinitionsFromConfiguration(): Promise<CanonicalSchemaDefinition[]> {
     const conceptRows = await this.getTable('concept', 'concept_configuration').select('*')
     const fieldRows = await this.getTable('concept_field', 'concept_configuration').select('*')
     const relationRows = await this.getTable('concept_relation', 'concept_configuration').select('*')
 
-    return this.mapRowsToConceptDefinitions(conceptRows, fieldRows, relationRows)
+    return this.mapRowsToCanonicalDefinitions(conceptRows, fieldRows, relationRows)
   }
 
-  private mapRowsToConceptDefinitions(
+  private mapRowsToCanonicalDefinitions(
     conceptRows: Array<Record<string, any>>,
     fieldRows: Array<Record<string, any>>,
     relationRows: Array<Record<string, any>>
-  ): SchemaConceptDefinition[] {
+  ): CanonicalSchemaDefinition[] {
+    const conceptsById = new Map<number, Record<string, any>>()
+    for (const row of conceptRows) {
+      conceptsById.set(Number(row.id), row)
+    }
 
-    const fieldsByConcept = this.groupFieldsByConcept(fieldRows)
-    const relationsByConcept = this.groupRelationsByConcept(relationRows)
+    const columnsByConcept = this.groupColumnsByConcept(fieldRows)
+    const relationRowsByConcept = this.groupRelationRowsByConcept(relationRows)
 
-    return conceptRows.map((row) => new SchemaConceptDefinition(
-      Number(row.id),
-      row.name,
-      row.table_name ?? row.name,
-      row.table_schema ?? 'concept_configuration',
-      fieldsByConcept[Number(row.id)] ?? [],
-      relationsByConcept[Number(row.id)] ?? []
-    ))
+    const definitions: CanonicalSchemaDefinition[] = conceptRows.map((row) => {
+      const conceptId = Number(row.id)
+      const tableName = this.resolveTableName(row.table_name, row.name)
+      const tableSchema = this.resolveSchemaName(row.table_schema)
+
+      const relations = (relationRowsByConcept[conceptId] ?? [])
+        .map((relationRow) => this.mapRelationRowToCanonical(relationRow, tableName, conceptsById))
+        .filter((relation): relation is CanonicalSchemaRelationDefinition => relation !== null)
+
+      return {
+        logicalName: String(row.name),
+        tableName,
+        tableSchema,
+        columns: columnsByConcept[conceptId] ?? [],
+        tableConstraints: [],
+        relations,
+      }
+    })
+
+    return CanonicalSchemaDefinitionAdapter.normalizeDefinitions(definitions)
   }
 
-  private groupFieldsByConcept(fieldRows: Array<Record<string, any>>): Record<number, SchemaFieldDefinition[]> {
-    return fieldRows.reduce<Record<number, SchemaFieldDefinition[]>>((acc, row) => {
+  private groupColumnsByConcept(fieldRows: Array<Record<string, any>>): Record<number, CanonicalSchemaColumnDefinition[]> {
+    return fieldRows.reduce<Record<number, CanonicalSchemaColumnDefinition[]>>((acc, row) => {
       const conceptId = Number(row.id_concept)
       acc[conceptId] ||= []
-      acc[conceptId].push(new SchemaFieldDefinition(row.name, row.type, {
-        nullable: row.nullable ?? true,
+      acc[conceptId].push({
+        columnName: this.resolveColumnName(row.column_name, row.name),
+        dataType: String(row.type),
+        nullable: row.nullable === undefined ? true : Boolean(row.nullable),
         unique: Boolean(row.unique),
         defaultValue: row.default_value ?? undefined,
         primaryKey: Boolean(row.primary_key),
-        columnName: row.column_name ?? undefined,
         label: row.label ?? undefined,
         description: row.description ?? undefined,
         position: row.position !== undefined ? Number(row.position) : undefined,
-      }))
+      })
+
       return acc
     }, {})
   }
 
-  private groupRelationsByConcept(relationRows: Array<Record<string, any>>): Record<number, SchemaRelationDefinition[]> {
-    return relationRows.reduce<Record<number, SchemaRelationDefinition[]>>((acc, row) => {
+  private groupRelationRowsByConcept(relationRows: Array<Record<string, any>>): Record<number, Array<Record<string, any>>> {
+    return relationRows.reduce<Record<number, Array<Record<string, any>>>>((acc, row) => {
       const conceptId = Number(row.id_concept_source)
       acc[conceptId] ||= []
-      acc[conceptId].push(new SchemaRelationDefinition(
-        Number(row.id),
-        conceptId,
-        Number(row.id_concept_target),
-        row.relation_type,
-        row.foreign_key,
-        row.mapped_by ?? undefined,
-        row.source_field ?? undefined,
-        row.target_field ?? undefined
-      ))
+      acc[conceptId].push(row)
       return acc
     }, {})
   }
 
-  private async ensureTable(concept: SchemaConceptDefinition): Promise<void> {
-    const schemaName = concept.getResolvedTableSchema()
-    const tableName = concept.getResolvedTableName()
+  private mapRelationRowToCanonical(
+    relationRow: Record<string, any>,
+    sourceTableName: string,
+    conceptsById: Map<number, Record<string, any>>
+  ): CanonicalSchemaRelationDefinition | null {
+    const targetConcept = conceptsById.get(Number(relationRow.id_concept_target))
+    if (!targetConcept) {
+      return null
+    }
+
+    const targetTableName = this.resolveTableName(targetConcept.table_name, targetConcept.name)
+    const fallbackForeignKey = `${targetTableName}_id`
+
+    return {
+      relationType: this.normalizeRelationType(relationRow.relation_type),
+      sourceEntity: sourceTableName,
+      targetEntity: targetTableName,
+      foreignKeyColumn: toSnakeCase(String(relationRow.foreign_key ?? fallbackForeignKey)),
+      mappedBy: relationRow.mapped_by ?? undefined,
+      sourceField: relationRow.source_field ?? undefined,
+      targetField: relationRow.target_field ?? undefined,
+    }
+  }
+
+  private normalizeRelationType(value: unknown): CanonicalSchemaRelationType {
+    const normalized = String(value || '').trim().toLowerCase()
+    if (normalized === 'manytoone') {
+      return 'manyToOne'
+    }
+    if (normalized === 'onetomany') {
+      return 'oneToMany'
+    }
+    if (normalized === 'onetoone') {
+      return 'oneToOne'
+    }
+
+    return 'unknown'
+  }
+
+  private resolveTableName(rawTableName: unknown, fallbackName: unknown): string {
+    return toSnakeCase(String(rawTableName ?? fallbackName))
+  }
+
+  private resolveSchemaName(schemaName: unknown): string {
+    return String(schemaName ?? 'concept_configuration')
+  }
+
+  private resolveColumnName(rawColumnName: unknown, fallbackName: unknown): string {
+    return toSnakeCase(String(rawColumnName ?? fallbackName))
+  }
+
+  private groupDefinitionsByTableName(definitions: CanonicalSchemaDefinition[]): Map<string, CanonicalSchemaDefinition[]> {
+    const grouped = new Map<string, CanonicalSchemaDefinition[]>()
+    for (const definition of definitions) {
+      const bucket = grouped.get(definition.tableName) ?? []
+      bucket.push(definition)
+      grouped.set(definition.tableName, bucket)
+    }
+
+    return grouped
+  }
+
+  private findRelatedDefinition(
+    relation: CanonicalSchemaRelationDefinition,
+    sourceDefinition: CanonicalSchemaDefinition,
+    definitionsByTable: Map<string, CanonicalSchemaDefinition[]>
+  ): CanonicalSchemaDefinition | null {
+    const candidates = definitionsByTable.get(relation.targetEntity) ?? []
+    if (candidates.length === 0) {
+      return null
+    }
+
+    if (candidates.length === 1) {
+      return candidates[0]
+    }
+
+    const sourceSchema = this.resolveSchemaName(sourceDefinition.tableSchema)
+    return candidates.find((candidate) => this.resolveSchemaName(candidate.tableSchema) === sourceSchema) ?? candidates[0]
+  }
+
+  private async ensureTable(definition: CanonicalSchemaDefinition): Promise<void> {
+    const schemaName = this.resolveSchemaName(definition.tableSchema)
+    const tableName = definition.tableName
 
     const schemaBuilder = this.getSchemaBuilder(schemaName)
     const exists = await schemaBuilder.hasTable(tableName)
     if (!exists) {
       await schemaBuilder.createTable(tableName, (table) => {
-        this.applyColumns(table, concept.fields)
-        this.applyCreateTableConstraints(table, concept)
+        this.applyColumns(table, definition.columns)
+        this.applyCreateTableConstraints(table, definition)
       })
       return
     }
 
     const existingColumns = new Set<string>()
-    for (const field of concept.fields) {
-      const hasColumn = await schemaBuilder.hasColumn(tableName, this.resolveFieldColumnName(field))
+    for (const column of definition.columns) {
+      const hasColumn = await schemaBuilder.hasColumn(tableName, column.columnName)
       if (hasColumn) {
-        existingColumns.add(this.resolveFieldColumnName(field))
+        existingColumns.add(column.columnName)
       }
     }
 
-    const missingColumns = concept.fields.filter((field) => !existingColumns.has(this.resolveFieldColumnName(field)))
+    const missingColumns = definition.columns.filter((column) => !existingColumns.has(column.columnName))
 
     if (missingColumns.length > 0) {
       await schemaBuilder.alterTable(tableName, (table) => {
-        for (const field of missingColumns) {
-          this.applyColumn(table, field)
+        for (const column of missingColumns) {
+          this.applyColumn(table, column)
         }
       })
     }
 
-    await this.ensureUniqueConstraints(concept)
+    await this.ensureUniqueConstraints(definition)
   }
 
-  private async ensureRelations(concept: SchemaConceptDefinition, conceptsById: Map<number, SchemaConceptDefinition>): Promise<void> {
-    for (const relation of concept.relations) {
-      const relationContext = this.resolveRelationContext(relation, concept, conceptsById)
+  private async ensureRelations(
+    definition: CanonicalSchemaDefinition,
+    definitionsByTable: Map<string, CanonicalSchemaDefinition[]>
+  ): Promise<void> {
+    for (const relation of definition.relations) {
+      if (relation.sourceEntity !== definition.tableName) {
+        continue
+      }
+
+      const relationContext = this.resolveRelationContext(relation, definition, definitionsByTable)
       if (!relationContext) {
         continue
       }
@@ -163,9 +254,9 @@ export class SchemaManagementService {
   }
 
   private resolveRelationContext(
-    relation: SchemaRelationDefinition,
-    sourceConcept: SchemaConceptDefinition,
-    conceptsById: Map<number, SchemaConceptDefinition>
+    relation: CanonicalSchemaRelationDefinition,
+    sourceDefinition: CanonicalSchemaDefinition,
+    definitionsByTable: Map<string, CanonicalSchemaDefinition[]>
   ): {
     ownerSchemaName: string
     ownerTableName: string
@@ -173,32 +264,32 @@ export class SchemaManagementService {
     columnName: string
     unique: boolean
   } | null {
-    const targetConcept = conceptsById.get(relation.targetConceptId)
-    if (!targetConcept) {
+    const targetDefinition = this.findRelatedDefinition(relation, sourceDefinition, definitionsByTable)
+    if (!targetDefinition) {
       return null
     }
 
-    const sourceSchemaName = sourceConcept.getResolvedTableSchema()
-    const sourceTableName = sourceConcept.getResolvedTableName()
-    const targetSchemaName = targetConcept.getResolvedTableSchema()
-    const targetTableName = targetConcept.getResolvedTableName()
+    const sourceSchemaName = this.resolveSchemaName(sourceDefinition.tableSchema)
+    const sourceTableName = sourceDefinition.tableName
+    const targetSchemaName = this.resolveSchemaName(targetDefinition.tableSchema)
+    const targetTableName = targetDefinition.tableName
 
-    if (relation.isManyToOne() || relation.isOneToOne()) {
+    if (relation.relationType === 'manyToOne' || relation.relationType === 'oneToOne') {
       return {
         ownerSchemaName: sourceSchemaName,
         ownerTableName: sourceTableName,
         reference: this.buildReferenceName(targetSchemaName, targetTableName),
-        columnName: this.resolveForeignKeyColumnName(relation, targetConcept),
-        unique: relation.requiresUniqueForeignKey(),
+        columnName: this.resolveForeignKeyColumnName(relation, targetTableName),
+        unique: relation.relationType === 'oneToOne',
       }
     }
 
-    if (relation.isOneToMany()) {
+    if (relation.relationType === 'oneToMany') {
       return {
         ownerSchemaName: targetSchemaName,
         ownerTableName: targetTableName,
         reference: this.buildReferenceName(sourceSchemaName, sourceTableName),
-        columnName: this.resolveForeignKeyColumnName(relation, sourceConcept),
+        columnName: this.resolveForeignKeyColumnName(relation, sourceTableName),
         unique: false,
       }
     }
@@ -206,8 +297,8 @@ export class SchemaManagementService {
     return null
   }
 
-  private resolveForeignKeyColumnName(relation: SchemaRelationDefinition, defaultTargetConcept: SchemaConceptDefinition): string {
-    const rawName = relation.foreignKey || relation.targetField || `${toSnakeCase(defaultTargetConcept.name)}_id`
+  private resolveForeignKeyColumnName(relation: CanonicalSchemaRelationDefinition, fallbackTargetTable: string): string {
+    const rawName = relation.foreignKeyColumn || relation.targetField || `${toSnakeCase(fallbackTargetTable)}_id`
     return toSnakeCase(String(rawName))
   }
 
@@ -238,16 +329,16 @@ export class SchemaManagementService {
     return tableName
   }
 
-  private applyColumns(table: Knex.CreateTableBuilder, fields: SchemaFieldDefinition[]): void {
+  private applyColumns(table: Knex.CreateTableBuilder, columns: CanonicalSchemaColumnDefinition[]): void {
     table.increments('id').notNullable()
 
-    for (const field of fields) {
-      this.applyColumn(table, field)
+    for (const column of columns) {
+      this.applyColumn(table, column)
     }
   }
 
-  private applyCreateTableConstraints(table: Knex.CreateTableBuilder, concept: SchemaConceptDefinition): void {
-    for (const constraint of concept.tableConstraints) {
+  private applyCreateTableConstraints(table: Knex.CreateTableBuilder, definition: CanonicalSchemaDefinition): void {
+    for (const constraint of definition.tableConstraints) {
       if (constraint.type !== 'unique' || !constraint.columns.length) {
         continue
       }
@@ -256,17 +347,18 @@ export class SchemaManagementService {
     }
   }
 
-  private async ensureUniqueConstraints(concept: SchemaConceptDefinition): Promise<void> {
-    const uniqueConstraints = concept.tableConstraints.filter((constraint) => constraint.type === 'unique' && constraint.columns.length > 0)
+  private async ensureUniqueConstraints(definition: CanonicalSchemaDefinition): Promise<void> {
+    const uniqueConstraints = definition.tableConstraints.filter((constraint) => constraint.type === 'unique' && constraint.columns.length > 0)
     if (uniqueConstraints.length === 0) {
       return
     }
 
-    const schemaBuilder = this.getSchemaBuilder(concept.getResolvedTableSchema())
-    const tableName = concept.getResolvedTableName()
+    const schemaName = this.resolveSchemaName(definition.tableSchema)
+    const schemaBuilder = this.getSchemaBuilder(schemaName)
+    const tableName = definition.tableName
 
     for (const constraint of uniqueConstraints) {
-      const alreadyExists = await this.hasUniqueConstraint(concept.getResolvedTableSchema(), tableName, constraint.columns, constraint.name)
+      const alreadyExists = await this.hasUniqueConstraint(schemaName, tableName, constraint.columns, constraint.name)
       if (alreadyExists) {
         continue
       }
@@ -355,30 +447,30 @@ export class SchemaManagementService {
     return false
   }
 
-  private applyColumn(table: Knex.CreateTableBuilder | Knex.AlterTableBuilder, field: SchemaFieldDefinition): void {
-    const columnBuilder = this.createColumnBuilder(table, field)
+  private applyColumn(table: Knex.CreateTableBuilder | Knex.AlterTableBuilder, column: CanonicalSchemaColumnDefinition): void {
+    const columnBuilder = this.createColumnBuilder(table, column)
 
-    if (field.primaryKey) {
+    if (column.primaryKey) {
       columnBuilder.primary()
     }
 
-    if (field.unique) {
+    if (column.unique) {
       columnBuilder.unique()
     }
 
-    if (field.nullable === false) {
+    if (column.nullable === false) {
       columnBuilder.notNullable()
     }
 
-    if (field.defaultValue !== undefined) {
-      columnBuilder.defaultTo(field.defaultValue as any)
+    if (column.defaultValue !== undefined) {
+      columnBuilder.defaultTo(column.defaultValue as any)
     }
   }
 
-  private createColumnBuilder(table: Knex.CreateTableBuilder | Knex.AlterTableBuilder, field: SchemaFieldDefinition) {
-    const columnName = this.resolveFieldColumnName(field)
+  private createColumnBuilder(table: Knex.CreateTableBuilder | Knex.AlterTableBuilder, column: CanonicalSchemaColumnDefinition) {
+    const columnName = column.columnName
 
-    switch (field.type.toLowerCase()) {
+    switch (column.dataType.toLowerCase()) {
       case 'string':
       case 'varchar':
       case 'text':
@@ -403,74 +495,5 @@ export class SchemaManagementService {
       default:
         return table.string(columnName)
     }
-  }
-
-  private resolveFieldColumnName(field: SchemaFieldDefinition): string {
-    return toSnakeCase(String(field.columnName ?? field.name))
-  }
-
-  private mapCanonicalDefinitionsToConceptDefinitions(definitions: CanonicalSchemaDefinition[]): SchemaConceptDefinition[] {
-    const conceptsByTableName = new Map<string, { id: number; definition: CanonicalSchemaDefinition }>()
-    const concepts = definitions.map((definition, index) => {
-      const conceptId = index + 1
-      conceptsByTableName.set(definition.tableName, { id: conceptId, definition })
-
-      const fields = definition.columns.map((column) => new SchemaFieldDefinition(
-        column.columnName,
-        column.dataType,
-        {
-          nullable: column.nullable,
-          unique: column.unique,
-          defaultValue: column.defaultValue,
-          primaryKey: column.primaryKey,
-          columnName: column.columnName,
-          label: column.label,
-          description: column.description,
-          position: column.position,
-        }
-      ))
-
-      return new SchemaConceptDefinition(
-        conceptId,
-        definition.logicalName,
-        definition.tableName,
-        definition.tableSchema,
-        fields,
-        [],
-        definition.tableConstraints.map((constraint) => ({ ...constraint }))
-      )
-    })
-
-    let relationId = 1
-    for (const concept of concepts) {
-      const sourceDefinition = definitions.find((definition) => definition.tableName === concept.getResolvedTableName())
-      if (!sourceDefinition) {
-        continue
-      }
-
-      for (const relation of sourceDefinition.relations) {
-        if (relation.sourceEntity !== sourceDefinition.tableName) {
-          continue
-        }
-
-        const target = conceptsByTableName.get(relation.targetEntity)
-        if (!target) {
-          continue
-        }
-
-        concept.relations.push(new SchemaRelationDefinition(
-          relationId++,
-          concept.id,
-          target.id,
-          relation.relationType,
-          relation.foreignKeyColumn,
-          relation.mappedBy,
-          relation.sourceField,
-          relation.targetField
-        ))
-      }
-    }
-
-    return concepts
   }
 }

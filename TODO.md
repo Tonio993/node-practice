@@ -233,6 +233,7 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - introdurre tipi nominali o file distinti per rendere visibile a colpo d’occhio cosa è sorgente e cosa è canonico
 
 ### Step 5. Rifattorizzare `SchemaManagementService` per lavorare nativamente sul modello canonico
+- stato: [COMPLETATO]
 - obiettivo intermedio:
   - `syncFromConfiguration()` legge le righe di configurazione e le converte subito nel modello canonico
   - `syncFromDefinitions()` accetta direttamente il modello canonico oppure lo riceve tramite adapter
@@ -242,6 +243,17 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - riscrivere `ensureTable`, `ensureRelations`, `ensureUniqueConstraints` per dipendere solo dal modello canonico
 - beneficio:
   - un solo linguaggio interno per tutto il motore schema
+- note implementative:
+  - `SchemaManagementService` ora usa `CanonicalSchemaDefinition` come shape interna primaria per l'intera pipeline DDL
+  - `syncFromConfiguration()` carica e normalizza direttamente definizioni canoniche (`loadCanonicalDefinitionsFromConfiguration`)
+  - `syncFromDefinitions(...)` è stato reso canonical-only sul boundary pubblico del servizio
+  - rimosso il mapping operativo da canonical a `SchemaConceptDefinition` per il percorso DDL
+  - riscritte in chiave canonica le fasi di apply:
+    - `ensureTable(...)`
+    - `ensureRelations(...)`
+    - `ensureUniqueConstraints(...)`
+  - mantenuta idempotenza di creazione colonne, FK e vincoli unique compositi nel nuovo flusso
+  - copertura test aggiornata in `tests/schema-management.service.test.ts` (input da configurazione + input canonico)
 
 ### Step 6. Ridurre o eliminare la conversione inversa engine -> concept
 - il metodo `mapEngineDefinitionsToConceptDefinitions(...)` in `schema-management.service.ts` è un sintomo dell’attuale doppio modello operativo

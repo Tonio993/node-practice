@@ -3,7 +3,6 @@ import knex, { Knex } from 'knex'
 import { SchemaManagementService } from '../src/shared/generic-entity/schema-management.service'
 import { CanonicalSchemaDefinition, CanonicalSchemaDefinitionAdapter } from '../src/shared/generic-entity/canonical-schema-definition'
 import type { EngineEntityDefinition } from '../src/shared/generic-entity/engine-entity-definition'
-import { SchemaConceptDefinition, SchemaFieldDefinition, SchemaRelationDefinition } from '../src/shared/generic-entity/schema-definition'
 
 describe('schema management service', () => {
   let db: Knex
@@ -94,7 +93,7 @@ describe('schema management service', () => {
     await db.destroy()
   })
 
-  it('maps raw configuration rows into an internal schema model', async () => {
+  it('maps raw configuration rows into canonical schema definitions', async () => {
     const conceptId = await db('concept').insert({
       name: 'User',
       table_name: 'user',
@@ -117,11 +116,23 @@ describe('schema management service', () => {
     })
 
     const service = new SchemaManagementService(db)
-    const concepts = await (service as any).loadConceptDefinitions()
+    const definitions = await (service as any).loadCanonicalDefinitionsFromConfiguration()
 
-    expect(concepts[0]).toBeInstanceOf(SchemaConceptDefinition)
-    expect(concepts[0].fields[0]).toBeInstanceOf(SchemaFieldDefinition)
-    expect(concepts[0].relations[0]).toBeInstanceOf(SchemaRelationDefinition)
+    expect(definitions).toHaveLength(1)
+    expect(definitions[0].logicalName).toBe('User')
+    expect(definitions[0].tableName).toBe('user')
+    expect(definitions[0].columns[0]).toMatchObject({
+      columnName: 'username',
+      dataType: 'string',
+      nullable: false,
+      unique: true,
+    })
+    expect(definitions[0].relations[0]).toMatchObject({
+      relationType: 'manyToOne',
+      sourceEntity: 'user',
+      targetEntity: 'user',
+      foreignKeyColumn: 'account_id',
+    })
   })
 
   it('creates a concrete table from concept configuration rows', async () => {
@@ -281,10 +292,11 @@ describe('schema management service', () => {
         },
       },
     ]
+    const canonicalDefinitions = CanonicalSchemaDefinitionAdapter.fromEngineDefinitions(definitions)
 
     const service = new SchemaManagementService(db)
-    await service.syncFromDefinitions(definitions)
-    await service.syncFromDefinitions(definitions)
+    await service.syncFromDefinitions(canonicalDefinitions)
+    await service.syncFromDefinitions(canonicalDefinitions)
 
     const hasOrderTable = await db.schema.hasTable('order_table')
     const hasTenantColumn = await db.schema.hasColumn('order_table', 'tenant_id')
