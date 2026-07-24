@@ -296,12 +296,18 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - aggiunta copertura test per proiezione canonical -> runtime in `tests/generic-entity.repository.engine.test.ts`
 
 ### Step 8. Rifattorizzare il bootstrap delle tabelle statiche
+- stato: [COMPLETATO]
 - aggiornare il bootstrap in `src/db/knex.ts` in modo che:
   - le entity statiche decorate siano convertite nel modello canonico
   - il motore DDL applichi il modello canonico per creare o allineare le tabelle statiche
   - successivamente la configurazione runtime venga letta, convertita nel modello canonico e sincronizzata
 - obiettivo:
   - stessa pipeline per statico e dinamico, cambiano solo gli adapter di ingresso
+- note implementative:
+  - rimosso il bootstrap manuale tabella-per-tabella da `src/db/knex.ts`
+  - introdotta conversione delle entity statiche (`Concept`, `ConceptField`, `ConceptRelation`) in modello canonico via `CanonicalSchemaDefinitionAdapter.fromDecoratedEntities(...)`
+  - applicate le definizioni statiche tramite `SchemaManagementService.syncFromDefinitions(...)`
+  - mantenuto `syncFromConfiguration()` come secondo passaggio per la sincronizzazione delle tabelle dinamiche
 
 ### Step 9. Introdurre supporto esplicito al compare/diff
 - una volta ottenuto il modello canonico, aggiungere una fase esplicita di confronto tra:
