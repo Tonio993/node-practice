@@ -152,6 +152,7 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
 5. il motore deve poter lavorare su input provenienti da sorgenti diverse senza branching per sorgente
 
 ### Step 1. Definire il perimetro del modello canonico
+- stato: [COMPLETATO]
 - identificare quali campi servono davvero al motore DDL:
   - nome entità logica
   - `tableName`
@@ -165,8 +166,12 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - eventuali dettagli puramente object-level che il DDL non usa direttamente
 - output atteso:
   - una specifica scritta nel TODO o in un file dedicato con elenco campi obbligatori, opzionali e invarianti
+- output prodotto:
+  - specifica formale creata in `src/shared/generic-entity/canonical-ddl-model.spec.md`
+  - include: perimetro, campi inclusi, campi esclusi, invarianti, responsabilità DDL, contratto adapter baseline
 
 ### Step 2. Scegliere se evolvere `EngineEntityDefinition` o introdurre un nuovo tipo canonico
+- stato: [COMPLETATO - DECISIONE E BASELINE IMPLEMENTATA]
 - valutare se `EngineEntityDefinition` attuale è già adatto come modello canonico DDL oppure se è troppo orientato al repository
 - criteri di scelta:
   - se i campi attuali coprono il DDL senza ambiguità, conviene evolvere `EngineEntityDefinition`
@@ -174,6 +179,18 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
 - decisione consigliata:
   - preferire un modello canonico esplicitamente orientato al DDL se si prevede supporto futuro a diff, drop, rename, migration planning
   - preferire l’evoluzione di `EngineEntityDefinition` solo se si vuole minimizzare il refactoring e il repository resta allineato alle stesse semantiche
+- proposta formalizzata:
+  - introdurre un tipo canonico DDL dedicato e mantenere `EngineEntityDefinition` come modello runtime del repository
+  - gestire una fase transitoria con adapter esplicito `EngineEntityDefinition -> CanonicalSchemaDefinition`
+  - dettaglio proposta in `src/shared/generic-entity/canonical-ddl-model.spec.md` (sezione "Step 2 Proposal")
+- note implementative:
+  - introdotto il nuovo modello canonico in `src/shared/generic-entity/canonical-schema-definition.ts`
+  - aggiunti adapter espliciti:
+    - decorator -> canonical (`CanonicalSchemaDefinitionAdapter.fromDecoratedEntity`)
+    - concept configuration -> canonical (`CanonicalSchemaDefinitionAdapter.fromConcepts`)
+    - engine legacy -> canonical (`CanonicalSchemaDefinitionAdapter.fromEngineDefinitions`)
+  - aggiornato `SchemaManagementService.syncFromDefinitions(...)` per accettare input canonico come percorso preferito, mantenendo compatibilità legacy
+  - aggiunto test dedicato in `tests/schema-management.service.test.ts` per il percorso canonico
 
 ### Step 3. Normalizzare il modello delle relazioni
 - definire una rappresentazione relazionale unica per il motore
