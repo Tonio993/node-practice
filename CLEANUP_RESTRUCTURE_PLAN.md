@@ -22,7 +22,12 @@
 	- estratte costanti e helper condivisi nel service per client/schema/report vuoto
 	- ridotte duplicazioni locali negli adapter canonical/engine
 	- validazione eseguita con typecheck e suite completa verdi
-- Fase 2: non iniziata
+- Fase 2: completata
+	- estratto `schema-policy.guard.ts` con regole `signal/block`, allowlist e approval token
+	- estratto `schema-introspection.repository.ts` con logica sqlite/postgres per schema builder, reference, colonne e unique constraints
+	- estratto `schema-diff.builder.ts` con creazione report/plan e classificazione azioni safe/destructive
+	- estratto `schema-apply.executor.ts` con gestione apply DDL (table/columns/relations/unique)
+	- `SchemaManagementService` aggiornato come orchestratore che delega policy, introspection, diff e apply
 - Fase 3: non iniziata
 - Fase 4: non iniziata
 - Fase 5: non iniziata

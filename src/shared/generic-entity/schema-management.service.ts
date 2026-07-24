@@ -8,10 +8,19 @@ import {
   CanonicalSchemaRelationDefinition,
   CanonicalSchemaRelationType,
 } from './canonical-schema-definition'
+import { SchemaIntrospectionRepository } from './schema-introspection.repository'
+import {
+  getBlockedDestructiveActions,
+  hasValidApprovalToken,
+  resolveDestructivePolicy,
+} from './schema-policy.guard'
+import {
+  buildDiffPlan,
+  createEmptyReport,
+} from './schema-diff.builder'
+import { SchemaApplyExecutor } from './schema-apply.executor'
 
 const DEFAULT_SCHEMA_NAME = 'concept_configuration'
-const PUBLIC_SCHEMA_NAME = 'public'
-const SQLITE_CLIENT_TOKEN = 'sqlite'
 
 export interface SchemaColumnDiff {
   schemaName: string
@@ -112,73 +121,16 @@ export class SchemaSyncApprovalError extends Error {
 }
 
 export class SchemaManagementService {
-  constructor(private readonly db: Knex) {}
+  private readonly applyExecutor: SchemaApplyExecutor
 
-  private getClientName(): string {
-    return String(this.db.client.config.client || '').toLowerCase()
-  }
-
-  private isSqliteClient(): boolean {
-    return this.getClientName().includes(SQLITE_CLIENT_TOKEN)
-  }
-
-  private useSchemaQualification(schemaName: string | undefined): boolean {
-    return Boolean(schemaName && schemaName !== PUBLIC_SCHEMA_NAME && !this.isSqliteClient())
-  }
-
-  private hasValidApprovalToken(options: SchemaSyncOptions): boolean {
-    const expectedToken = process.env.SCHEMA_SYNC_APPROVAL_TOKEN
-    const providedToken = options.approvalToken?.trim()
-    if (!expectedToken || !providedToken) {
-      return false
-    }
-
-    return providedToken === expectedToken
-  }
-
-  private getBlockedDestructiveActions(
-    destructiveActions: SchemaDiffPlannedAction[],
-    allowDestructiveActions: SchemaDiffActionKind[] | undefined
-  ): SchemaDiffPlannedAction[] {
-    if (!allowDestructiveActions?.length) {
-      return destructiveActions
-    }
-
-    const allowedKinds = new Set(allowDestructiveActions)
-    return destructiveActions.filter((action) => !allowedKinds.has(action.kind))
-  }
-
-  private resolveDestructivePolicy(options: SchemaSyncOptions): SchemaDestructivePolicy {
-    // Backward compatible path: explicit boolean option still wins if provided.
-    if (options.failOnDestructive !== undefined) {
-      return options.failOnDestructive ? 'block' : 'signal'
-    }
-
-    return options.destructivePolicy ?? 'signal'
-  }
-
-  private createEmptyPlan(): SchemaDiffPlan {
-    return {
-      safeActions: [],
-      destructiveActions: [],
-      summary: {
-        totalActions: 0,
-        safeActions: 0,
-        destructiveActions: 0,
-      },
-    }
-  }
-
-  private createEmptyReport(): SchemaDiffReport {
-    return {
-      missingTables: [],
-      missingColumns: [],
-      columnTypeMismatches: [],
-      columnNullabilityMismatches: [],
-      missingUniqueConstraints: [],
-      missingRelationColumns: [],
-      plan: this.createEmptyPlan(),
-    }
+  constructor(
+    private readonly db: Knex,
+    private readonly introspection = new SchemaIntrospectionRepository(db)
+  ) {
+    this.applyExecutor = new SchemaApplyExecutor(
+      this.introspection,
+      (schemaName) => this.resolveSchemaName(schemaName)
+    )
   }
 
   async compareFromConfiguration(): Promise<SchemaDiffReport> {
@@ -199,7 +151,7 @@ export class SchemaManagementService {
   }
 
   async compareDefinitions(definitions: CanonicalSchemaDefinition[]): Promise<SchemaDiffReport> {
-    const report = this.createEmptyReport()
+    const report = createEmptyReport()
 
     if (definitions.length === 0) {
       return report
@@ -316,7 +268,7 @@ export class SchemaManagementService {
       }
     }
 
-    report.plan = this.buildDiffPlan(report)
+    report.plan = buildDiffPlan(report)
     return report
   }
 
@@ -332,20 +284,20 @@ export class SchemaManagementService {
     definitions: CanonicalSchemaDefinition[],
     options: SchemaSyncOptions = {}
   ): Promise<SchemaSyncExecutionResult> {
-    const destructivePolicy = this.resolveDestructivePolicy(options)
+    const destructivePolicy = resolveDestructivePolicy(options)
 
     if (definitions.length === 0) {
       return {
         applied: false,
         destructivePolicy,
         blockedDestructiveActions: [],
-        report: this.createEmptyReport(),
+        report: createEmptyReport(),
       }
     }
 
     const normalizedDefinitions = CanonicalSchemaDefinitionAdapter.normalizeDefinitions(definitions)
     const report = await this.compareDefinitions(normalizedDefinitions)
-    const blockedDestructiveActions = this.getBlockedDestructiveActions(
+    const blockedDestructiveActions = getBlockedDestructiveActions(
       report.plan.destructiveActions,
       options.allowDestructiveActions
     )
@@ -364,7 +316,7 @@ export class SchemaManagementService {
     }
 
     const hasDestructiveDiffs = report.plan.destructiveActions.length > 0
-    if (options.requireApprovalToken && hasDestructiveDiffs && !this.hasValidApprovalToken(options)) {
+    if (options.requireApprovalToken && hasDestructiveDiffs && !hasValidApprovalToken(options)) {
       throw new SchemaSyncApprovalError(report)
     }
 
@@ -387,15 +339,7 @@ export class SchemaManagementService {
   }
 
   private async applyCanonicalDefinitions(definitions: CanonicalSchemaDefinition[]): Promise<void> {
-    const definitionsByTable = this.groupDefinitionsByTableName(definitions)
-
-    for (const definition of definitions) {
-      await this.ensureTable(definition)
-    }
-
-    for (const definition of definitions) {
-      await this.ensureRelations(definition, definitionsByTable)
-    }
+    await this.applyExecutor.applyCanonicalDefinitions(definitions)
   }
 
   private async loadCanonicalDefinitionsFromConfiguration(): Promise<CanonicalSchemaDefinition[]> {
@@ -550,70 +494,6 @@ export class SchemaManagementService {
     return candidates.find((candidate) => this.resolveSchemaName(candidate.tableSchema) === sourceSchema) ?? candidates[0]
   }
 
-  private async ensureTable(definition: CanonicalSchemaDefinition): Promise<void> {
-    const schemaName = this.resolveSchemaName(definition.tableSchema)
-    const tableName = definition.tableName
-
-    const schemaBuilder = this.getSchemaBuilder(schemaName)
-    const exists = await schemaBuilder.hasTable(tableName)
-    if (!exists) {
-      await schemaBuilder.createTable(tableName, (table) => {
-        this.applyColumns(table, definition.columns)
-        this.applyCreateTableConstraints(table, definition)
-      })
-      return
-    }
-
-    const existingColumns = new Set<string>()
-    for (const column of definition.columns) {
-      const hasColumn = await schemaBuilder.hasColumn(tableName, column.columnName)
-      if (hasColumn) {
-        existingColumns.add(column.columnName)
-      }
-    }
-
-    const missingColumns = definition.columns.filter((column) => !existingColumns.has(column.columnName))
-
-    if (missingColumns.length > 0) {
-      await schemaBuilder.alterTable(tableName, (table) => {
-        for (const column of missingColumns) {
-          this.applyColumn(table, column)
-        }
-      })
-    }
-
-    await this.ensureUniqueConstraints(definition)
-  }
-
-  private async ensureRelations(
-    definition: CanonicalSchemaDefinition,
-    definitionsByTable: Map<string, CanonicalSchemaDefinition[]>
-  ): Promise<void> {
-    for (const relation of definition.relations) {
-      if (relation.sourceEntity !== definition.tableName) {
-        continue
-      }
-
-      const relationContext = this.resolveRelationContext(relation, definition, definitionsByTable)
-      if (!relationContext) {
-        continue
-      }
-
-      const ownerSchemaBuilder = this.getSchemaBuilder(relationContext.ownerSchemaName)
-      const hasColumn = await ownerSchemaBuilder.hasColumn(relationContext.ownerTableName, relationContext.columnName)
-      if (hasColumn) {
-        continue
-      }
-
-      await ownerSchemaBuilder.alterTable(relationContext.ownerTableName, (table) => {
-        const relationColumn = table.integer(relationContext.columnName).unsigned().references('id').inTable(relationContext.reference)
-        if (relationContext.unique) {
-          relationColumn.unique()
-        }
-      })
-    }
-  }
-
   private resolveRelationContext(
     relation: CanonicalSchemaRelationDefinition,
     sourceDefinition: CanonicalSchemaDefinition,
@@ -664,27 +544,15 @@ export class SchemaManagementService {
   }
 
   private getSchemaBuilder(schemaName: string) {
-    if (this.useSchemaQualification(schemaName)) {
-      return this.db.schema.withSchema(schemaName)
-    }
-
-    return this.db.schema
+    return this.introspection.getSchemaBuilder(schemaName)
   }
 
   private getTable(tableName: string, schemaName?: string) {
-    if (this.useSchemaQualification(schemaName)) {
-      return this.db(`${schemaName}.${tableName}`)
-    }
-
-    return this.db(tableName)
+    return this.introspection.getTable(tableName, schemaName)
   }
 
   private buildReferenceName(schemaName: string, tableName: string): string {
-    if (this.useSchemaQualification(schemaName)) {
-      return `${schemaName}.${tableName}`
-    }
-
-    return tableName
+    return this.introspection.buildReferenceName(schemaName, tableName)
   }
 
   private normalizeExpectedType(column: CanonicalSchemaColumnDefinition): string {
@@ -722,33 +590,6 @@ export class SchemaManagementService {
     return column.nullable !== false
   }
 
-  private normalizeActualType(value: unknown): string {
-    const normalized = String(value || '').trim().toLowerCase()
-    if (normalized.includes('char') || normalized.includes('text')) {
-      return 'string'
-    }
-    if (normalized === 'integer' || normalized === 'int' || normalized === 'int4' || normalized === 'bigint' || normalized === 'int8') {
-      return 'integer'
-    }
-    if (normalized === 'boolean' || normalized === 'bool') {
-      return 'boolean'
-    }
-    if (normalized === 'date') {
-      return 'date'
-    }
-    if (normalized.includes('timestamp') || normalized.includes('datetime')) {
-      return 'datetime'
-    }
-    if (normalized === 'json' || normalized === 'jsonb') {
-      return 'json'
-    }
-    if (normalized === 'real' || normalized === 'numeric' || normalized === 'decimal' || normalized === 'float' || normalized === 'double precision') {
-      return 'float'
-    }
-
-    return normalized || 'string'
-  }
-
   private getUniqueConstraints(constraints: CanonicalSchemaConstraintDefinition[]): CanonicalSchemaConstraintDefinition[] {
     return constraints.filter((constraint) => constraint.type === 'unique' && constraint.columns.length > 0)
   }
@@ -757,175 +598,7 @@ export class SchemaManagementService {
     schemaName: string,
     tableName: string
   ): Promise<Map<string, { normalizedType: string; nullable: boolean }>> {
-    const columns = new Map<string, { normalizedType: string; nullable: boolean }>()
-
-    if (this.isSqliteClient()) {
-      const rows = await this.db.raw(`PRAGMA table_info('${tableName}')`) as Array<{
-        name: string
-        type: string
-        notnull: number
-      }>
-
-      for (const row of rows) {
-        columns.set(String(row.name).toLowerCase(), {
-          normalizedType: this.normalizeActualType(row.type),
-          nullable: Number(row.notnull) === 0,
-        })
-      }
-
-      return columns
-    }
-
-    const rows = await this.db
-      .select('column_name as columnName', 'data_type as dataType', 'is_nullable as isNullable')
-      .from('information_schema.columns')
-      .where('table_schema', schemaName)
-      .andWhere('table_name', tableName)
-
-    for (const row of rows as Array<{ columnName: string; dataType: string; isNullable: string }>) {
-      columns.set(String(row.columnName).toLowerCase(), {
-        normalizedType: this.normalizeActualType(row.dataType),
-        nullable: String(row.isNullable).toUpperCase() === 'YES',
-      })
-    }
-
-    return columns
-  }
-
-  private buildDiffPlan(report: SchemaDiffReport): SchemaDiffPlan {
-    const safeActions: SchemaDiffPlannedAction[] = []
-    const destructiveActions: SchemaDiffPlannedAction[] = []
-
-    for (const table of report.missingTables) {
-      safeActions.push({
-        kind: 'createTable',
-        risk: 'safe',
-        severity: 'warning',
-        schemaName: table.schemaName,
-        tableName: table.tableName,
-        target: table.tableName,
-        reason: `Table ${table.tableName} is missing and should be created`,
-      })
-    }
-
-    for (const column of report.missingColumns) {
-      safeActions.push({
-        kind: 'addColumn',
-        risk: 'safe',
-        severity: 'warning',
-        schemaName: column.schemaName,
-        tableName: column.tableName,
-        target: column.columnName,
-        reason: `Column ${column.columnName} is missing`,
-      })
-    }
-
-    for (const constraint of report.missingUniqueConstraints) {
-      safeActions.push({
-        kind: 'addUniqueConstraint',
-        risk: 'safe',
-        severity: 'warning',
-        schemaName: constraint.schemaName,
-        tableName: constraint.tableName,
-        target: constraint.constraintName ?? constraint.columns.join(','),
-        reason: `Unique constraint on columns ${constraint.columns.join(', ')} is missing`,
-      })
-    }
-
-    for (const relation of report.missingRelationColumns) {
-      safeActions.push({
-        kind: 'addRelationColumn',
-        risk: 'safe',
-        severity: 'warning',
-        schemaName: relation.ownerSchemaName,
-        tableName: relation.ownerTableName,
-        target: relation.columnName,
-        reason: `Relation foreign key column ${relation.columnName} is missing`,
-      })
-    }
-
-    for (const mismatch of report.columnTypeMismatches) {
-      destructiveActions.push({
-        kind: 'alterColumnType',
-        risk: 'destructive',
-        severity: 'error',
-        schemaName: mismatch.schemaName,
-        tableName: mismatch.tableName,
-        target: mismatch.columnName,
-        reason: `Column type mismatch (${mismatch.actualType} -> ${mismatch.expectedType}) may require destructive migration`,
-      })
-    }
-
-    for (const mismatch of report.columnNullabilityMismatches) {
-      const shouldTightenNullability = mismatch.expectedNullable === false && mismatch.actualNullable === true
-      const action: SchemaDiffPlannedAction = {
-        kind: 'alterColumnNullability',
-        risk: shouldTightenNullability ? 'destructive' : 'safe',
-        severity: shouldTightenNullability ? 'error' : 'warning',
-        schemaName: mismatch.schemaName,
-        tableName: mismatch.tableName,
-        target: mismatch.columnName,
-        reason: shouldTightenNullability
-          ? `Making column ${mismatch.columnName} NOT NULL may fail if null rows exist`
-          : `Column ${mismatch.columnName} can be relaxed to nullable`,
-      }
-
-      if (shouldTightenNullability) {
-        destructiveActions.push(action)
-      } else {
-        safeActions.push(action)
-      }
-    }
-
-    return {
-      safeActions,
-      destructiveActions,
-      summary: {
-        totalActions: safeActions.length + destructiveActions.length,
-        safeActions: safeActions.length,
-        destructiveActions: destructiveActions.length,
-      },
-    }
-  }
-
-  private applyColumns(table: Knex.CreateTableBuilder, columns: CanonicalSchemaColumnDefinition[]): void {
-    table.increments('id').notNullable()
-
-    for (const column of columns) {
-      this.applyColumn(table, column)
-    }
-  }
-
-  private applyCreateTableConstraints(table: Knex.CreateTableBuilder, definition: CanonicalSchemaDefinition): void {
-    for (const constraint of definition.tableConstraints) {
-      if (constraint.type !== 'unique' || !constraint.columns.length) {
-        continue
-      }
-
-      table.unique(constraint.columns, constraint.name)
-    }
-  }
-
-  private async ensureUniqueConstraints(definition: CanonicalSchemaDefinition): Promise<void> {
-    const uniqueConstraints = definition.tableConstraints.filter((constraint) => constraint.type === 'unique' && constraint.columns.length > 0)
-    if (uniqueConstraints.length === 0) {
-      return
-    }
-
-    const schemaName = this.resolveSchemaName(definition.tableSchema)
-    const schemaBuilder = this.getSchemaBuilder(schemaName)
-    const tableName = definition.tableName
-
-    for (const constraint of uniqueConstraints) {
-      const alreadyExists = await this.hasUniqueConstraint(schemaName, tableName, constraint.columns, constraint.name)
-      if (alreadyExists) {
-        continue
-      }
-
-      await schemaBuilder.alterTable(tableName, (table) => {
-        table.unique(constraint.columns, constraint.name)
-      })
-    }
+    return this.introspection.getExistingColumns(schemaName, tableName)
   }
 
   private async hasUniqueConstraint(
@@ -934,124 +607,6 @@ export class SchemaManagementService {
     columns: string[],
     constraintName?: string
   ): Promise<boolean> {
-    const normalizedColumns = columns.map((column) => column.toLowerCase())
-
-    if (this.isSqliteClient()) {
-      const indexes = await this.db.raw(`PRAGMA index_list('${tableName}')`) as Array<{ name: string; unique: number }>
-      for (const index of indexes) {
-        if (!index.unique) {
-          continue
-        }
-        if (constraintName && index.name === constraintName) {
-          return true
-        }
-
-        const indexColumns = await this.db.raw(`PRAGMA index_info('${index.name}')`) as Array<{ name: string }>
-        const normalizedIndexColumns = indexColumns.map((column) => String(column.name).toLowerCase())
-        if (
-          normalizedIndexColumns.length === normalizedColumns.length
-          && normalizedColumns.every((column, idx) => normalizedIndexColumns[idx] === column)
-        ) {
-          return true
-        }
-      }
-
-      return false
-    }
-
-    const rows = await this.db
-      .select(
-        'tc.constraint_name as constraintName',
-        'kcu.column_name as columnName',
-        'kcu.ordinal_position as ordinalPosition'
-      )
-      .from('information_schema.table_constraints as tc')
-      .join('information_schema.key_column_usage as kcu', function () {
-        this.on('tc.constraint_name', '=', 'kcu.constraint_name')
-          .andOn('tc.table_schema', '=', 'kcu.table_schema')
-          .andOn('tc.table_name', '=', 'kcu.table_name')
-      })
-      .where('tc.constraint_type', 'UNIQUE')
-      .andWhere('tc.table_schema', schemaName)
-      .andWhere('tc.table_name', tableName)
-
-    const columnsByConstraint = new Map<string, Array<{ name: string; position: number }>>()
-    for (const row of rows as Array<{ constraintName: string; columnName: string; ordinalPosition: number }>) {
-      const constraintColumns = columnsByConstraint.get(row.constraintName) ?? []
-      constraintColumns.push({
-        name: String(row.columnName).toLowerCase(),
-        position: Number(row.ordinalPosition),
-      })
-      columnsByConstraint.set(row.constraintName, constraintColumns)
-    }
-
-    for (const [name, constraintColumns] of columnsByConstraint.entries()) {
-      if (constraintName && name !== constraintName) {
-        continue
-      }
-
-      const orderedColumns = constraintColumns
-        .sort((a, b) => a.position - b.position)
-        .map((column) => column.name)
-
-      if (
-        orderedColumns.length === normalizedColumns.length
-        && normalizedColumns.every((column, idx) => orderedColumns[idx] === column)
-      ) {
-        return true
-      }
-    }
-
-    return false
-  }
-
-  private applyColumn(table: Knex.CreateTableBuilder | Knex.AlterTableBuilder, column: CanonicalSchemaColumnDefinition): void {
-    const columnBuilder = this.createColumnBuilder(table, column)
-
-    if (column.primaryKey) {
-      columnBuilder.primary()
-    }
-
-    if (column.unique) {
-      columnBuilder.unique()
-    }
-
-    if (column.nullable === false) {
-      columnBuilder.notNullable()
-    }
-
-    if (column.defaultValue !== undefined) {
-      columnBuilder.defaultTo(column.defaultValue as any)
-    }
-  }
-
-  private createColumnBuilder(table: Knex.CreateTableBuilder | Knex.AlterTableBuilder, column: CanonicalSchemaColumnDefinition) {
-    const columnName = column.columnName
-
-    switch (column.dataType.toLowerCase()) {
-      case 'string':
-      case 'varchar':
-      case 'text':
-        return table.string(columnName)
-      case 'integer':
-      case 'int':
-        return table.integer(columnName)
-      case 'boolean':
-      case 'bool':
-        return table.boolean(columnName)
-      case 'date':
-        return table.date(columnName)
-      case 'datetime':
-      case 'timestamp':
-        return table.datetime(columnName)
-      case 'json':
-        return table.json(columnName)
-      case 'decimal':
-      case 'float':
-      case 'number':
-        return table.float(columnName)
-      default:
-        return table.string(columnName)
-    }
+    return this.introspection.hasUniqueConstraint(schemaName, tableName, columns, constraintName)
   }
 }
