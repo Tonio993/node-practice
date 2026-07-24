@@ -3,6 +3,7 @@
         "git add": true,
         "git commit": true,
         ".vscode/settings.json": true,
-        "Set-Content": true
+        "Set-Content": true,
+        "npx tsc": true
     }
 }
