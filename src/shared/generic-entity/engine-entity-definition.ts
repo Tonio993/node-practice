@@ -61,19 +61,13 @@ export class EngineEntityDefinitionAdapter {
     }
 
     const entityMetadata = getEntityMetadata(entityClass)
-    const oneToMany = this.fromDecoratorRelations(getOneToManyRelations(entityClass))
-    const manyToOne = this.fromDecoratorRelations(getManyToOneRelations(entityClass))
-    const oneToOne = this.fromDecoratorRelations(getOneToOneRelations(entityClass))
+    const relations = this.fromDecoratedEntityRelations(entityClass)
 
     return {
       name: entityClass.name,
       tableName: String(entityMetadata?.tableName ?? toSnakeCase(entityClass.name)),
       tableSchema: entityMetadata?.tableSchema,
-      relations: {
-        oneToMany,
-        manyToOne,
-        oneToOne,
-      },
+      relations,
       columns: this.fromDecoratorColumns(entityClass),
       tableConstraints: (entityMetadata?.tableConstraints ?? []).map((constraint) => ({ ...constraint })),
     }
@@ -133,6 +127,14 @@ export class EngineEntityDefinitionAdapter {
         position: column.position,
       })),
       tableConstraints: definition.tableConstraints.map((constraint) => ({ ...constraint })),
+    }
+  }
+
+  private static fromDecoratedEntityRelations(entityClass: Function): EngineEntityRelationsDefinition {
+    return {
+      oneToMany: this.fromDecoratorRelations(getOneToManyRelations(entityClass)),
+      manyToOne: this.fromDecoratorRelations(getManyToOneRelations(entityClass)),
+      oneToOne: this.fromDecoratorRelations(getOneToOneRelations(entityClass)),
     }
   }
 

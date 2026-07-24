@@ -9,6 +9,10 @@ import {
   CanonicalSchemaRelationType,
 } from './canonical-schema-definition'
 
+const DEFAULT_SCHEMA_NAME = 'concept_configuration'
+const PUBLIC_SCHEMA_NAME = 'public'
+const SQLITE_CLIENT_TOKEN = 'sqlite'
+
 export interface SchemaColumnDiff {
   schemaName: string
   tableName: string
@@ -110,6 +114,18 @@ export class SchemaSyncApprovalError extends Error {
 export class SchemaManagementService {
   constructor(private readonly db: Knex) {}
 
+  private getClientName(): string {
+    return String(this.db.client.config.client || '').toLowerCase()
+  }
+
+  private isSqliteClient(): boolean {
+    return this.getClientName().includes(SQLITE_CLIENT_TOKEN)
+  }
+
+  private useSchemaQualification(schemaName: string | undefined): boolean {
+    return Boolean(schemaName && schemaName !== PUBLIC_SCHEMA_NAME && !this.isSqliteClient())
+  }
+
   private hasValidApprovalToken(options: SchemaSyncOptions): boolean {
     const expectedToken = process.env.SCHEMA_SYNC_APPROVAL_TOKEN
     const providedToken = options.approvalToken?.trim()
@@ -153,6 +169,18 @@ export class SchemaManagementService {
     }
   }
 
+  private createEmptyReport(): SchemaDiffReport {
+    return {
+      missingTables: [],
+      missingColumns: [],
+      columnTypeMismatches: [],
+      columnNullabilityMismatches: [],
+      missingUniqueConstraints: [],
+      missingRelationColumns: [],
+      plan: this.createEmptyPlan(),
+    }
+  }
+
   async compareFromConfiguration(): Promise<SchemaDiffReport> {
     const definitions = await this.loadCanonicalDefinitionsFromConfiguration()
     return this.compareDefinitions(definitions)
@@ -171,15 +199,7 @@ export class SchemaManagementService {
   }
 
   async compareDefinitions(definitions: CanonicalSchemaDefinition[]): Promise<SchemaDiffReport> {
-    const report: SchemaDiffReport = {
-      missingTables: [],
-      missingColumns: [],
-      columnTypeMismatches: [],
-      columnNullabilityMismatches: [],
-      missingUniqueConstraints: [],
-      missingRelationColumns: [],
-      plan: this.createEmptyPlan(),
-    }
+    const report = this.createEmptyReport()
 
     if (definitions.length === 0) {
       return report
@@ -319,15 +339,7 @@ export class SchemaManagementService {
         applied: false,
         destructivePolicy,
         blockedDestructiveActions: [],
-        report: {
-          missingTables: [],
-          missingColumns: [],
-          columnTypeMismatches: [],
-          columnNullabilityMismatches: [],
-          missingUniqueConstraints: [],
-          missingRelationColumns: [],
-          plan: this.createEmptyPlan(),
-        },
+        report: this.createEmptyReport(),
       }
     }
 
@@ -502,7 +514,7 @@ export class SchemaManagementService {
   }
 
   private resolveSchemaName(schemaName: unknown): string {
-    return String(schemaName ?? 'concept_configuration')
+    return String(schemaName ?? DEFAULT_SCHEMA_NAME)
   }
 
   private resolveColumnName(rawColumnName: unknown, fallbackName: unknown): string {
@@ -652,8 +664,7 @@ export class SchemaManagementService {
   }
 
   private getSchemaBuilder(schemaName: string) {
-    const client = String(this.db.client.config.client || '').toLowerCase()
-    if (schemaName && schemaName !== 'public' && !client.includes('sqlite')) {
+    if (this.useSchemaQualification(schemaName)) {
       return this.db.schema.withSchema(schemaName)
     }
 
@@ -661,8 +672,7 @@ export class SchemaManagementService {
   }
 
   private getTable(tableName: string, schemaName?: string) {
-    const client = String(this.db.client.config.client || '').toLowerCase()
-    if (schemaName && schemaName !== 'public' && !client.includes('sqlite')) {
+    if (this.useSchemaQualification(schemaName)) {
       return this.db(`${schemaName}.${tableName}`)
     }
 
@@ -670,8 +680,7 @@ export class SchemaManagementService {
   }
 
   private buildReferenceName(schemaName: string, tableName: string): string {
-    const client = String(this.db.client.config.client || '').toLowerCase()
-    if (schemaName && schemaName !== 'public' && !client.includes('sqlite')) {
+    if (this.useSchemaQualification(schemaName)) {
       return `${schemaName}.${tableName}`
     }
 
@@ -748,10 +757,9 @@ export class SchemaManagementService {
     schemaName: string,
     tableName: string
   ): Promise<Map<string, { normalizedType: string; nullable: boolean }>> {
-    const client = String(this.db.client.config.client || '').toLowerCase()
     const columns = new Map<string, { normalizedType: string; nullable: boolean }>()
 
-    if (client.includes('sqlite')) {
+    if (this.isSqliteClient()) {
       const rows = await this.db.raw(`PRAGMA table_info('${tableName}')`) as Array<{
         name: string
         type: string
@@ -926,10 +934,9 @@ export class SchemaManagementService {
     columns: string[],
     constraintName?: string
   ): Promise<boolean> {
-    const client = String(this.db.client.config.client || '').toLowerCase()
     const normalizedColumns = columns.map((column) => column.toLowerCase())
 
-    if (client.includes('sqlite')) {
+    if (this.isSqliteClient()) {
       const indexes = await this.db.raw(`PRAGMA index_list('${tableName}')`) as Array<{ name: string; unique: number }>
       for (const index of indexes) {
         if (!index.unique) {

@@ -161,11 +161,7 @@ export class CanonicalSchemaDefinitionAdapter {
         columns: [...constraint.columns],
         name: constraint.name,
       })),
-      relations: [
-        ...this.fromDecoratorRelations(tableName, 'oneToMany', getOneToManyRelations(entityClass)),
-        ...this.fromDecoratorRelations(tableName, 'manyToOne', getManyToOneRelations(entityClass)),
-        ...this.fromDecoratorRelations(tableName, 'oneToOne', getOneToOneRelations(entityClass)),
-      ],
+      relations: this.fromDecoratedEntityRelations(entityClass, tableName),
     })
   }
 
@@ -200,6 +196,14 @@ export class CanonicalSchemaDefinitionAdapter {
         ...this.fromEngineRelations(definition.tableName, 'oneToOne', definition.relations.oneToOne),
       ],
     })))
+  }
+
+  private static fromDecoratedEntityRelations(entityClass: Function, sourceTableName: string): CanonicalSchemaRelationDefinition[] {
+    return [
+      ...this.fromDecoratorRelations(sourceTableName, 'oneToMany', getOneToManyRelations(entityClass)),
+      ...this.fromDecoratorRelations(sourceTableName, 'manyToOne', getManyToOneRelations(entityClass)),
+      ...this.fromDecoratorRelations(sourceTableName, 'oneToOne', getOneToOneRelations(entityClass)),
+    ]
   }
 
   private static fromDecoratorRelations(
