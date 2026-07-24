@@ -4,7 +4,7 @@ import {
   CanonicalSchemaDefinitionAdapter,
   CanonicalSchemaRelationDefinition,
 } from './canonical-schema-definition'
-import { SchemaConceptDefinition, SchemaRelationDefinition } from './schema-definition'
+import { SchemaConceptDefinition } from './schema-definition'
 import {
   getEntityColumns,
   getEntityMetadata,
@@ -143,47 +143,6 @@ export class EngineEntityDefinitionAdapter {
     }
   }
 
-  static fromConcept(
-    concept: SchemaConceptDefinition,
-    conceptsById: Map<number, SchemaConceptDefinition>
-  ): EngineEntityDefinition {
-    const oneToMany: EngineRelationDefinition[] = []
-    const manyToOne: EngineRelationDefinition[] = []
-    const oneToOne: EngineRelationDefinition[] = []
-
-    for (const relation of concept.relations) {
-      const engineRelation = this.toEngineRelation(concept, relation, conceptsById)
-      if (!engineRelation) {
-        continue
-      }
-
-      if (relation.isOneToMany()) {
-        oneToMany.push(engineRelation)
-        continue
-      }
-      if (relation.isManyToOne()) {
-        manyToOne.push(engineRelation)
-        continue
-      }
-      if (relation.isOneToOne()) {
-        oneToOne.push(engineRelation)
-      }
-    }
-
-    return {
-      name: concept.name,
-      tableName: concept.getResolvedTableName(),
-      tableSchema: concept.getResolvedTableSchema(),
-      relations: {
-        oneToMany,
-        manyToOne,
-        oneToOne,
-      },
-      columns: this.fromConceptColumns(concept),
-      tableConstraints: concept.tableConstraints.map((constraint) => ({ ...constraint })),
-    }
-  }
-
   private static fromDecoratorRelations(relations: Relation[]): EngineRelationDefinition[] {
     return relations.map((relation) => {
       const targetEntity = relation.targetEntity()
@@ -214,47 +173,6 @@ export class EngineEntityDefinitionAdapter {
       description: column.description,
       position: column.position,
     }))
-  }
-
-  private static fromConceptColumns(concept: SchemaConceptDefinition): EngineColumnDefinition[] {
-    return concept.fields.map((field) => ({
-      propertyKey: toCamelCase(field.name),
-      name: field.columnName ?? toSnakeCase(field.name),
-      type: field.type,
-      nullable: field.nullable,
-      unique: field.unique,
-      defaultValue: field.defaultValue,
-      primaryKey: field.primaryKey,
-      label: field.label,
-      description: field.description,
-      position: field.position,
-    }))
-  }
-
-  private static toEngineRelation(
-    sourceConcept: SchemaConceptDefinition,
-    relation: SchemaRelationDefinition,
-    conceptsById: Map<number, SchemaConceptDefinition>
-  ): EngineRelationDefinition | null {
-    const targetConcept = conceptsById.get(relation.targetConceptId)
-    if (!targetConcept) {
-      return null
-    }
-
-    const fallbackPropertyKey = relation.isOneToMany()
-      ? this.toCollectionPropertyName(targetConcept.name)
-      : toCamelCase(targetConcept.name)
-
-    const propertyKey = this.toPropertyKey(relation.sourceField, fallbackPropertyKey)
-    const mappedBy = this.toOptionalPropertyKey(relation.mappedBy ?? relation.targetField)
-    const foreignKey = this.toForeignKeyName(relation.foreignKey, targetConcept.name)
-
-    return {
-      propertyKey,
-      mappedBy,
-      foreignKey,
-      targetTableName: targetConcept.getResolvedTableName(),
-    }
   }
 
   private static toEngineRelationFromCanonical(
