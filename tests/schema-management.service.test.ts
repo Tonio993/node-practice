@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import knex, { Knex } from 'knex'
 import { SchemaManagementService } from '../src/shared/generic-entity/schema-management.service'
+import { CanonicalSchemaDefinition, CanonicalSchemaDefinitionAdapter } from '../src/shared/generic-entity/canonical-schema-definition'
 import type { EngineEntityDefinition } from '../src/shared/generic-entity/engine-entity-definition'
 import { SchemaConceptDefinition, SchemaFieldDefinition, SchemaRelationDefinition } from '../src/shared/generic-entity/schema-definition'
 
@@ -293,6 +294,58 @@ describe('schema management service', () => {
     expect(hasOrderTable).toBe(true)
     expect(hasTenantColumn).toBe(true)
     expect(hasExternalCodeColumn).toBe(true)
+    expect(hasCompositeUnique).toBe(true)
+  })
+
+  it('syncs schema from canonical definitions with legacy compatibility path removed from caller', async () => {
+    const legacyDefinitions: EngineEntityDefinition[] = [
+      {
+        name: 'Invoice',
+        tableName: 'invoice_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            propertyKey: 'tenantId',
+            name: 'tenant_id',
+            type: 'string',
+            nullable: false,
+          },
+          {
+            propertyKey: 'invoiceNumber',
+            name: 'invoice_number',
+            type: 'string',
+            nullable: false,
+          },
+        ],
+        tableConstraints: [
+          {
+            type: 'unique',
+            columns: ['tenant_id', 'invoice_number'],
+            name: 'invoice_tenant_number_unique',
+          },
+        ],
+        relations: {
+          oneToMany: [],
+          manyToOne: [],
+          oneToOne: [],
+        },
+      },
+    ]
+
+    const canonicalDefinitions: CanonicalSchemaDefinition[] = CanonicalSchemaDefinitionAdapter.fromEngineDefinitions(legacyDefinitions)
+    const service = new SchemaManagementService(db)
+
+    await service.syncFromDefinitions(canonicalDefinitions)
+    await service.syncFromDefinitions(canonicalDefinitions)
+
+    const hasTable = await db.schema.hasTable('invoice_table')
+    const hasTenantColumn = await db.schema.hasColumn('invoice_table', 'tenant_id')
+    const hasInvoiceNumberColumn = await db.schema.hasColumn('invoice_table', 'invoice_number')
+    const hasCompositeUnique = await hasUniqueIndexOnColumns('invoice_table', ['tenant_id', 'invoice_number'])
+
+    expect(hasTable).toBe(true)
+    expect(hasTenantColumn).toBe(true)
+    expect(hasInvoiceNumberColumn).toBe(true)
     expect(hasCompositeUnique).toBe(true)
   })
 })

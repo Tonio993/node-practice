@@ -1,5 +1,10 @@
 import type { Knex } from 'knex'
 import { toSnakeCase } from '../utils/case.util'
+import {
+  CanonicalSchemaDefinition,
+  CanonicalSchemaDefinitionAdapter,
+  isCanonicalSchemaDefinitionArray,
+} from './canonical-schema-definition'
 import type { EngineEntityDefinition } from './engine-entity-definition'
 import { SchemaConceptDefinition, SchemaFieldDefinition, SchemaRelationDefinition } from './schema-definition'
 
@@ -11,8 +16,16 @@ export class SchemaManagementService {
     await this.applyConceptDefinitions(concepts)
   }
 
-  async syncFromDefinitions(definitions: EngineEntityDefinition[]): Promise<void> {
-    const concepts = this.mapEngineDefinitionsToConceptDefinitions(definitions)
+  async syncFromDefinitions(definitions: EngineEntityDefinition[] | CanonicalSchemaDefinition[]): Promise<void> {
+    if (definitions.length === 0) {
+      return
+    }
+
+    const canonicalDefinitions = isCanonicalSchemaDefinitionArray(definitions)
+      ? definitions
+      : CanonicalSchemaDefinitionAdapter.fromEngineDefinitions(definitions)
+
+    const concepts = this.mapCanonicalDefinitionsToConceptDefinitions(canonicalDefinitions)
     await this.applyConceptDefinitions(concepts)
   }
 
@@ -395,21 +408,21 @@ export class SchemaManagementService {
     return toSnakeCase(String(field.columnName ?? field.name))
   }
 
-  private mapEngineDefinitionsToConceptDefinitions(definitions: EngineEntityDefinition[]): SchemaConceptDefinition[] {
-    const conceptsByTableName = new Map<string, { id: number; definition: EngineEntityDefinition }>()
+  private mapCanonicalDefinitionsToConceptDefinitions(definitions: CanonicalSchemaDefinition[]): SchemaConceptDefinition[] {
+    const conceptsByTableName = new Map<string, { id: number; definition: CanonicalSchemaDefinition }>()
     const concepts = definitions.map((definition, index) => {
       const conceptId = index + 1
       conceptsByTableName.set(definition.tableName, { id: conceptId, definition })
 
       const fields = definition.columns.map((column) => new SchemaFieldDefinition(
-        column.name,
-        column.type,
+        column.columnName,
+        column.dataType,
         {
           nullable: column.nullable,
           unique: column.unique,
           defaultValue: column.defaultValue,
           primaryKey: column.primaryKey,
-          columnName: column.name,
+          columnName: column.columnName,
           label: column.label,
           description: column.description,
           position: column.position,
@@ -418,7 +431,7 @@ export class SchemaManagementService {
 
       return new SchemaConceptDefinition(
         conceptId,
-        definition.name,
+        definition.logicalName,
         definition.tableName,
         definition.tableSchema,
         fields,
@@ -434,35 +447,26 @@ export class SchemaManagementService {
         continue
       }
 
-      const appendRelation = (
-        relationType: 'oneToMany' | 'manyToOne' | 'oneToOne',
-        relation: { targetTableName: string; foreignKey: string; mappedBy?: string; propertyKey: string }
-      ) => {
-        const target = conceptsByTableName.get(relation.targetTableName)
+      for (const relation of sourceDefinition.relations) {
+        if (relation.sourceEntity !== sourceDefinition.tableName) {
+          continue
+        }
+
+        const target = conceptsByTableName.get(relation.targetEntity)
         if (!target) {
-          return
+          continue
         }
 
         concept.relations.push(new SchemaRelationDefinition(
           relationId++,
           concept.id,
           target.id,
-          relationType,
-          relation.foreignKey,
+          relation.relationType,
+          relation.foreignKeyColumn,
           relation.mappedBy,
-          relation.propertyKey,
-          relation.mappedBy
+          relation.sourceField,
+          relation.targetField
         ))
-      }
-
-      for (const relation of sourceDefinition.relations.oneToMany) {
-        appendRelation('oneToMany', relation)
-      }
-      for (const relation of sourceDefinition.relations.manyToOne) {
-        appendRelation('manyToOne', relation)
-      }
-      for (const relation of sourceDefinition.relations.oneToOne) {
-        appendRelation('oneToOne', relation)
       }
     }
 

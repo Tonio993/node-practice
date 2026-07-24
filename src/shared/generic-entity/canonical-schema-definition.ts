@@ -1,0 +1,238 @@
+import { toSnakeCase } from '../utils/case.util'
+import type { EngineEntityDefinition } from './engine-entity-definition'
+import {
+  getEntityColumns,
+  getEntityMetadata,
+  getManyToOneRelations,
+  getOneToManyRelations,
+  getOneToOneRelations,
+  hasEntityMetadata,
+  Relation,
+} from './generic-entity.decorator'
+import { SchemaConceptDefinition, SchemaRelationDefinition } from './schema-definition'
+
+export type CanonicalSchemaRelationType = 'manyToOne' | 'oneToMany' | 'oneToOne' | 'unknown'
+
+export interface CanonicalSchemaColumnDefinition {
+  columnName: string
+  dataType: string
+  nullable?: boolean
+  unique?: boolean
+  defaultValue?: unknown
+  primaryKey?: boolean
+  label?: string
+  description?: string
+  position?: number
+}
+
+export interface CanonicalSchemaConstraintDefinition {
+  type: 'unique' | 'primary' | 'foreignKey'
+  columns: string[]
+  name?: string
+}
+
+export interface CanonicalSchemaRelationDefinition {
+  relationType: CanonicalSchemaRelationType
+  sourceEntity: string
+  targetEntity: string
+  foreignKeyColumn: string
+  mappedBy?: string
+  sourceField?: string
+  targetField?: string
+}
+
+export interface CanonicalSchemaDefinition {
+  logicalName: string
+  tableName: string
+  tableSchema?: string
+  columns: CanonicalSchemaColumnDefinition[]
+  tableConstraints: CanonicalSchemaConstraintDefinition[]
+  relations: CanonicalSchemaRelationDefinition[]
+}
+
+function normalizeRelationType(value: string): CanonicalSchemaRelationType {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'manytoone') {
+    return 'manyToOne'
+  }
+  if (normalized === 'onetomany') {
+    return 'oneToMany'
+  }
+  if (normalized === 'onetoone') {
+    return 'oneToOne'
+  }
+
+  return 'unknown'
+}
+
+export function isCanonicalSchemaDefinitionArray(
+  definitions: EngineEntityDefinition[] | CanonicalSchemaDefinition[]
+): definitions is CanonicalSchemaDefinition[] {
+  if (definitions.length === 0) {
+    return false
+  }
+
+  const first = definitions[0] as Partial<CanonicalSchemaDefinition>
+  return typeof first.logicalName === 'string' && Array.isArray(first.relations)
+}
+
+export class CanonicalSchemaDefinitionAdapter {
+  static fromDecoratedEntity(entityClass: Function): CanonicalSchemaDefinition {
+    if (!hasEntityMetadata(entityClass)) {
+      throw new Error(`Entity class ${entityClass.name} is missing @Entity decorator`)
+    }
+
+    const entityMetadata = getEntityMetadata(entityClass)
+    const tableName = String(entityMetadata?.tableName ?? toSnakeCase(entityClass.name))
+
+    return {
+      logicalName: entityClass.name,
+      tableName,
+      tableSchema: entityMetadata?.tableSchema,
+      columns: getEntityColumns(entityClass).map((column) => ({
+        columnName: column.columnName ?? toSnakeCase(column.propertyKey),
+        dataType: column.type,
+        nullable: column.nullable,
+        unique: column.unique,
+        defaultValue: column.defaultValue,
+        primaryKey: column.primaryKey,
+        label: column.label,
+        description: column.description,
+        position: column.position,
+      })),
+      tableConstraints: (entityMetadata?.tableConstraints ?? []).map((constraint) => ({
+        type: constraint.type,
+        columns: [...constraint.columns],
+        name: constraint.name,
+      })),
+      relations: [
+        ...this.fromDecoratorRelations(tableName, 'oneToMany', getOneToManyRelations(entityClass)),
+        ...this.fromDecoratorRelations(tableName, 'manyToOne', getManyToOneRelations(entityClass)),
+        ...this.fromDecoratorRelations(tableName, 'oneToOne', getOneToOneRelations(entityClass)),
+      ],
+    }
+  }
+
+  static fromDecoratedEntities(entityClasses: Function[]): CanonicalSchemaDefinition[] {
+    return entityClasses.map((entityClass) => this.fromDecoratedEntity(entityClass))
+  }
+
+  static fromConcepts(concepts: SchemaConceptDefinition[]): CanonicalSchemaDefinition[] {
+    const conceptsById = new Map<number, SchemaConceptDefinition>(concepts.map((concept) => [concept.id, concept]))
+
+    return concepts.map((concept) => ({
+      logicalName: concept.name,
+      tableName: concept.getResolvedTableName(),
+      tableSchema: concept.getResolvedTableSchema(),
+      columns: concept.fields.map((field) => ({
+        columnName: field.columnName ?? toSnakeCase(field.name),
+        dataType: field.type,
+        nullable: field.nullable,
+        unique: field.unique,
+        defaultValue: field.defaultValue,
+        primaryKey: field.primaryKey,
+        label: field.label,
+        description: field.description,
+        position: field.position,
+      })),
+      tableConstraints: concept.tableConstraints.map((constraint) => ({
+        type: constraint.type,
+        columns: [...constraint.columns],
+        name: constraint.name,
+      })),
+      relations: concept.relations
+        .map((relation) => this.fromConceptRelation(concept, relation, conceptsById))
+        .filter((relation): relation is CanonicalSchemaRelationDefinition => relation !== null),
+    }))
+  }
+
+  static fromEngineDefinitions(definitions: EngineEntityDefinition[]): CanonicalSchemaDefinition[] {
+    return definitions.map((definition) => ({
+      logicalName: definition.name,
+      tableName: definition.tableName,
+      tableSchema: definition.tableSchema,
+      columns: definition.columns.map((column) => ({
+        columnName: column.name,
+        dataType: column.type,
+        nullable: column.nullable,
+        unique: column.unique,
+        defaultValue: column.defaultValue,
+        primaryKey: column.primaryKey,
+        label: column.label,
+        description: column.description,
+        position: column.position,
+      })),
+      tableConstraints: definition.tableConstraints.map((constraint) => ({
+        type: constraint.type,
+        columns: [...constraint.columns],
+        name: constraint.name,
+      })),
+      relations: [
+        ...this.fromEngineRelations(definition.tableName, 'oneToMany', definition.relations.oneToMany),
+        ...this.fromEngineRelations(definition.tableName, 'manyToOne', definition.relations.manyToOne),
+        ...this.fromEngineRelations(definition.tableName, 'oneToOne', definition.relations.oneToOne),
+      ],
+    }))
+  }
+
+  private static fromDecoratorRelations(
+    sourceTableName: string,
+    relationType: CanonicalSchemaRelationType,
+    relations: Relation[]
+  ): CanonicalSchemaRelationDefinition[] {
+    return relations.map((relation) => {
+      const targetEntity = relation.targetEntity()
+      const targetEntityMetadata = getEntityMetadata(targetEntity)
+      if (!targetEntityMetadata?.tableName) {
+        throw new Error(`Target entity ${targetEntity.name} is missing @Entity metadata`)
+      }
+
+      return {
+        relationType,
+        sourceEntity: sourceTableName,
+        targetEntity: targetEntityMetadata.tableName,
+        foreignKeyColumn: toSnakeCase(relation.foreignKey),
+        mappedBy: relation.mappedBy,
+        sourceField: relation.propertyKey,
+        targetField: relation.mappedBy,
+      }
+    })
+  }
+
+  private static fromConceptRelation(
+    sourceConcept: SchemaConceptDefinition,
+    relation: SchemaRelationDefinition,
+    conceptsById: Map<number, SchemaConceptDefinition>
+  ): CanonicalSchemaRelationDefinition | null {
+    const targetConcept = conceptsById.get(relation.targetConceptId)
+    if (!targetConcept) {
+      return null
+    }
+
+    return {
+      relationType: normalizeRelationType(relation.relationType),
+      sourceEntity: sourceConcept.getResolvedTableName(),
+      targetEntity: targetConcept.getResolvedTableName(),
+      foreignKeyColumn: toSnakeCase(String(relation.foreignKey || `${targetConcept.getResolvedTableName()}_id`)),
+      mappedBy: relation.mappedBy,
+      sourceField: relation.sourceField,
+      targetField: relation.targetField,
+    }
+  }
+
+  private static fromEngineRelations(
+    sourceTableName: string,
+    relationType: CanonicalSchemaRelationType,
+    relations: Array<{ targetTableName: string; foreignKey: string; mappedBy?: string; propertyKey: string }>
+  ): CanonicalSchemaRelationDefinition[] {
+    return relations.map((relation) => ({
+      relationType,
+      sourceEntity: sourceTableName,
+      targetEntity: relation.targetTableName,
+      foreignKeyColumn: toSnakeCase(relation.foreignKey),
+      mappedBy: relation.mappedBy,
+      sourceField: relation.propertyKey,
+      targetField: relation.mappedBy,
+    }))
+  }
+}
