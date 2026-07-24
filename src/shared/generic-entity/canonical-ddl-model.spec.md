@@ -121,6 +121,10 @@ During migration, support both inputs at service boundary:
 - canonical model (preferred)
 - EngineEntityDefinition (legacy-compatible via explicit adapter)
 
+Current status after Step 6:
+- service boundary is canonical-only (`syncFromDefinitions(definitions: CanonicalSchemaDefinition[])`)
+- legacy EngineEntityDefinition conversion is externalized to adapter boundaries
+
 Deprecation target:
 - once consumers are migrated, keep EngineEntityDefinition for repository runtime only
 - remove internal DDL dependence on SchemaConceptDefinition and EngineEntityDefinition
@@ -147,4 +151,4 @@ Runtime model keeps repository-specific fields:
 	- optional canonical -> runtime projection
 4. SchemaManagementService target signature agreed for next step:
 	- syncFromConfiguration() -> canonical pipeline
-	- syncFromDefinitions(...) accepts canonical input (plus temporary legacy adapter)
+	- syncFromDefinitions(...) accepts canonical input only

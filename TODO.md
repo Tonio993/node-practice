@@ -224,6 +224,7 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - aggiunti test dedicati in `tests/canonical-schema-definition.test.ts`
 
 ### Step 4. Separare il modello canonico dai modelli sorgente
+- stato: [COMPLETATO]
 - mantenere `schema-definition.ts` come modello della configurazione persistita, non come modello operativo del motore
 - mantenere i metadata da decorator come modello sorgente statico, già espresso in `generic-entity.decorator.ts`
 - introdurre adapter espliciti:
@@ -231,6 +232,14 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - configurazione runtime -> modello canonico
 - facoltativo ma consigliato:
   - introdurre tipi nominali o file distinti per rendere visibile a colpo d’occhio cosa è sorgente e cosa è canonico
+- note implementative:
+  - introdotto un file dedicato al modello canonico in `src/shared/generic-entity/canonical-schema-definition.ts`
+  - separati i modelli sorgente dal modello canonico tramite adapter espliciti:
+    - `CanonicalSchemaDefinitionAdapter.fromDecoratedEntity(...)`
+    - `CanonicalSchemaDefinitionAdapter.fromConcepts(...)`
+  - mantenuto `schema-definition.ts` come modello della configurazione persistita (source model), non usato come shape operativa del motore DDL
+  - allineato il servizio DDL a usare definizioni canoniche come input e pipeline interna in `src/shared/generic-entity/schema-management.service.ts`
+  - aggiunta copertura test del layer canonico in `tests/canonical-schema-definition.test.ts`
 
 ### Step 5. Rifattorizzare `SchemaManagementService` per lavorare nativamente sul modello canonico
 - stato: [COMPLETATO]
@@ -256,11 +265,18 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - copertura test aggiornata in `tests/schema-management.service.test.ts` (input da configurazione + input canonico)
 
 ### Step 6. Ridurre o eliminare la conversione inversa engine -> concept
+- stato: [COMPLETATO]
 - il metodo `mapEngineDefinitionsToConceptDefinitions(...)` in `schema-management.service.ts` è un sintomo dell’attuale doppio modello operativo
 - target architetturale:
   - il motore non deve più convertire il modello canonico in `SchemaConceptDefinition` per poter applicare DDL
 - risultato atteso:
   - `SchemaConceptDefinition` resta utile solo per rappresentare righe lette dal catalogo o per casi in cui si debba persistere la configurazione
+- note implementative:
+  - rimosso dal percorso DDL il passaggio intermedio canonical -> `SchemaConceptDefinition`
+  - eliminata la conversione inversa engine -> concept in `SchemaManagementService`
+  - `syncFromDefinitions(...)` espone ora solo input `CanonicalSchemaDefinition[]` sul boundary pubblico
+  - la compatibilità con `EngineEntityDefinition` resta disponibile fuori dal motore tramite adapter espliciti (`CanonicalSchemaDefinitionAdapter.fromEngineDefinitions`)
+  - aggiornata la specifica architetturale in `src/shared/generic-entity/canonical-ddl-model.spec.md`
 
 ### Step 7. Riallineare il repository generic entity rispetto al nuovo confine
 - decidere se il repository deve continuare a usare `EngineEntityDefinition` attuale oppure una proiezione runtime del modello canonico
