@@ -1,6 +1,7 @@
 import { toCamelCase, toSnakeCase } from '../utils/case.util'
 import { SchemaConceptDefinition, SchemaRelationDefinition } from './schema-definition'
 import {
+  getEntityColumns,
   getEntityMetadata,
   getManyToOneRelations,
   getOneToManyRelations,
@@ -22,11 +23,32 @@ export interface EngineEntityRelationsDefinition {
   oneToOne: EngineRelationDefinition[]
 }
 
+export interface EngineColumnDefinition {
+  propertyKey: string
+  name: string
+  type: string
+  nullable?: boolean
+  unique?: boolean
+  defaultValue?: unknown
+  primaryKey?: boolean
+  label?: string
+  description?: string
+  position?: number
+}
+
+export interface EngineTableConstraintDefinition {
+  type: 'unique' | 'primary' | 'foreignKey'
+  columns: string[]
+  name?: string
+}
+
 export interface EngineEntityDefinition {
   name: string
   tableName: string
   tableSchema?: string
   relations: EngineEntityRelationsDefinition
+  columns: EngineColumnDefinition[]
+  tableConstraints: EngineTableConstraintDefinition[]
 }
 
 export class EngineEntityDefinitionAdapter {
@@ -49,6 +71,8 @@ export class EngineEntityDefinitionAdapter {
         manyToOne,
         oneToOne,
       },
+      columns: this.fromDecoratorColumns(entityClass),
+      tableConstraints: (entityMetadata?.tableConstraints ?? []).map((constraint) => ({ ...constraint })),
     }
   }
 
@@ -93,6 +117,8 @@ export class EngineEntityDefinitionAdapter {
         manyToOne,
         oneToOne,
       },
+      columns: this.fromConceptColumns(concept),
+      tableConstraints: concept.tableConstraints.map((constraint) => ({ ...constraint })),
     }
   }
 
@@ -111,6 +137,36 @@ export class EngineEntityDefinitionAdapter {
         targetTableName: targetEntityMetadata.tableName,
       }
     })
+  }
+
+  private static fromDecoratorColumns(entityClass: Function): EngineColumnDefinition[] {
+    return getEntityColumns(entityClass).map((column) => ({
+      propertyKey: column.propertyKey,
+      name: column.columnName ?? toSnakeCase(column.propertyKey),
+      type: column.type,
+      nullable: column.nullable,
+      unique: column.unique,
+      defaultValue: column.defaultValue,
+      primaryKey: column.primaryKey,
+      label: column.label,
+      description: column.description,
+      position: column.position,
+    }))
+  }
+
+  private static fromConceptColumns(concept: SchemaConceptDefinition): EngineColumnDefinition[] {
+    return concept.fields.map((field) => ({
+      propertyKey: toCamelCase(field.name),
+      name: field.columnName ?? toSnakeCase(field.name),
+      type: field.type,
+      nullable: field.nullable,
+      unique: field.unique,
+      defaultValue: field.defaultValue,
+      primaryKey: field.primaryKey,
+      label: field.label,
+      description: field.description,
+      position: field.position,
+    }))
   }
 
   private static toEngineRelation(

@@ -3,9 +3,16 @@ import { toSnakeCase } from '../utils/case.util'
 
 const ENTITY_METADATA_KEY = 'entity'
 
+export interface TableConstraintDefinition {
+  type: 'unique' | 'primary' | 'foreignKey'
+  columns: string[]
+  name?: string
+}
+
 export interface EntityInfo {
   tableName?: string
   tableSchema?: string
+  tableConstraints?: TableConstraintDefinition[]
 }
 
 export interface Relation {

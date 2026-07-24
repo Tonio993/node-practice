@@ -28,6 +28,12 @@ export interface SchemaFieldOptions {
   position?: number
 }
 
+export interface SchemaTableConstraintDefinition {
+  type: 'unique' | 'primary' | 'foreignKey'
+  columns: string[]
+  name?: string
+}
+
 export class SchemaFieldDefinition {
   readonly nullable: boolean
   readonly unique: boolean
@@ -94,7 +100,8 @@ export class SchemaConceptDefinition {
     public readonly tableName?: string | null,
     public readonly tableSchema?: string | null,
     public readonly fields: SchemaFieldDefinition[] = [],
-    public readonly relations: SchemaRelationDefinition[] = []
+    public readonly relations: SchemaRelationDefinition[] = [],
+    public readonly tableConstraints: SchemaTableConstraintDefinition[] = []
   ) {}
 
   getResolvedTableName(): string {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import knex, { Knex } from 'knex'
 import { GenericEntityRepository } from '../src/shared/generic-entity/generic-entity.repository'
 import { EngineEntityDefinitionAdapter } from '../src/shared/generic-entity/engine-entity-definition'
+import { Column, Entity } from '../src/shared/generic-entity/generic-entity.decorator'
 import { SchemaConceptDefinition, SchemaRelationDefinition } from '../src/shared/generic-entity/schema-definition'
 
 describe('generic entity repository engine integration', () => {
@@ -91,6 +92,47 @@ describe('generic entity repository engine integration', () => {
 
     const saved = await db('employee').where({ id: created.id }).first()
     expect(saved.company_id).toBe(companyId)
+  })
+
+  it('maps decorated entity columns and table constraints into the engine definition', () => {
+    @Entity({
+      tableName: 'audit_event',
+      tableConstraints: [{
+        type: 'unique',
+        columns: ['tenant_id', 'event_type'],
+        name: 'audit_event_tenant_event_unique',
+      }],
+    })
+    class AuditEvent {
+      @Column({ nullable: false })
+      tenantId!: string
+
+      @Column({ nullable: false })
+      eventType!: string
+    }
+
+    const definition = EngineEntityDefinitionAdapter.fromDecoratedEntity(AuditEvent)
+
+    expect(definition.columns).toHaveLength(2)
+    expect(definition.columns[0]).toMatchObject({
+      propertyKey: 'tenantId',
+      name: 'tenant_id',
+      nullable: false,
+      type: 'string',
+    })
+    expect(definition.columns[1]).toMatchObject({
+      propertyKey: 'eventType',
+      name: 'event_type',
+      nullable: false,
+      type: 'string',
+    })
+    expect(definition.tableConstraints).toEqual([
+      {
+        type: 'unique',
+        columns: ['tenant_id', 'event_type'],
+        name: 'audit_event_tenant_event_unique',
+      },
+    ])
   })
 })
 
