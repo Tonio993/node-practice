@@ -279,12 +279,21 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - aggiornata la specifica architetturale in `src/shared/generic-entity/canonical-ddl-model.spec.md`
 
 ### Step 7. Riallineare il repository generic entity rispetto al nuovo confine
+- stato: [COMPLETATO]
 - decidere se il repository deve continuare a usare `EngineEntityDefinition` attuale oppure una proiezione runtime del modello canonico
 - approccio consigliato:
   - se il repository richiede ancora `propertyKey` e struttura bucketizzata delle relazioni, mantenere un modello runtime separato
   - aggiungere un adapter canonico -> runtime repository solo se necessario
 - beneficio:
   - evitare che esigenze CRUD contaminino il modello DDL
+- note implementative:
+  - confermata la separazione dei modelli: il repository continua a usare `EngineEntityDefinition` come runtime model
+  - introdotta la proiezione esplicita canonical -> runtime in `EngineEntityDefinitionAdapter`:
+    - `fromCanonicalDefinitions(...)`
+    - `fromCanonicalDefinition(...)`
+  - mantenuta la bucketizzazione relazionale (`oneToMany`, `manyToOne`, `oneToOne`) solo nel modello runtime
+  - aggiunto ingresso di boundary in factory: `GenericEntityFactory.fromCanonicalDefinition(...)`
+  - aggiunta copertura test per proiezione canonical -> runtime in `tests/generic-entity.repository.engine.test.ts`
 
 ### Step 8. Rifattorizzare il bootstrap delle tabelle statiche
 - aggiornare il bootstrap in `src/db/knex.ts` in modo che:

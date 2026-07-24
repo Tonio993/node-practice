@@ -1,4 +1,9 @@
 import { toCamelCase, toSnakeCase } from '../utils/case.util'
+import {
+  CanonicalSchemaDefinition,
+  CanonicalSchemaDefinitionAdapter,
+  CanonicalSchemaRelationDefinition,
+} from './canonical-schema-definition'
 import { SchemaConceptDefinition, SchemaRelationDefinition } from './schema-definition'
 import {
   getEntityColumns,
@@ -77,8 +82,65 @@ export class EngineEntityDefinitionAdapter {
   }
 
   static fromConcepts(concepts: SchemaConceptDefinition[]): EngineEntityDefinition[] {
-    const conceptsById = new Map<number, SchemaConceptDefinition>(concepts.map((concept) => [concept.id, concept]))
-    return concepts.map((concept) => this.fromConcept(concept, conceptsById))
+    const canonicalDefinitions = CanonicalSchemaDefinitionAdapter.fromConcepts(concepts)
+    return this.fromCanonicalDefinitions(canonicalDefinitions)
+  }
+
+  static fromCanonicalDefinitions(definitions: CanonicalSchemaDefinition[]): EngineEntityDefinition[] {
+    return definitions.map((definition) => this.fromCanonicalDefinition(definition))
+  }
+
+  static fromCanonicalDefinition(definition: CanonicalSchemaDefinition): EngineEntityDefinition {
+    const oneToMany: EngineRelationDefinition[] = []
+    const manyToOne: EngineRelationDefinition[] = []
+    const oneToOne: EngineRelationDefinition[] = []
+
+    for (const relation of definition.relations) {
+      if (relation.sourceEntity !== definition.tableName) {
+        continue
+      }
+
+      const engineRelation = this.toEngineRelationFromCanonical(relation)
+      if (!engineRelation) {
+        continue
+      }
+
+      if (relation.relationType === 'oneToMany') {
+        oneToMany.push(engineRelation)
+        continue
+      }
+      if (relation.relationType === 'manyToOne') {
+        manyToOne.push(engineRelation)
+        continue
+      }
+      if (relation.relationType === 'oneToOne') {
+        oneToOne.push(engineRelation)
+      }
+    }
+
+    return {
+      name: definition.logicalName,
+      tableName: definition.tableName,
+      tableSchema: definition.tableSchema,
+      relations: {
+        oneToMany,
+        manyToOne,
+        oneToOne,
+      },
+      columns: definition.columns.map((column) => ({
+        propertyKey: toCamelCase(column.columnName),
+        name: column.columnName,
+        type: column.dataType,
+        nullable: column.nullable,
+        unique: column.unique,
+        defaultValue: column.defaultValue,
+        primaryKey: column.primaryKey,
+        label: column.label,
+        description: column.description,
+        position: column.position,
+      })),
+      tableConstraints: definition.tableConstraints.map((constraint) => ({ ...constraint })),
+    }
   }
 
   static fromConcept(
@@ -192,6 +254,29 @@ export class EngineEntityDefinitionAdapter {
       mappedBy,
       foreignKey,
       targetTableName: targetConcept.getResolvedTableName(),
+    }
+  }
+
+  private static toEngineRelationFromCanonical(
+    relation: CanonicalSchemaRelationDefinition
+  ): EngineRelationDefinition | null {
+    if (relation.relationType === 'unknown') {
+      return null
+    }
+
+    const fallbackPropertyKey = relation.relationType === 'oneToMany'
+      ? this.toCollectionPropertyName(relation.targetEntity)
+      : toCamelCase(relation.targetEntity)
+
+    const propertyKey = this.toPropertyKey(relation.sourceField, fallbackPropertyKey)
+    const mappedBy = this.toOptionalPropertyKey(relation.mappedBy ?? relation.targetField)
+    const foreignKey = this.toForeignKeyName(relation.foreignKeyColumn, relation.targetEntity)
+
+    return {
+      propertyKey,
+      mappedBy,
+      foreignKey,
+      targetTableName: relation.targetEntity,
     }
   }
 

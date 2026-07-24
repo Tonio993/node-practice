@@ -1,4 +1,5 @@
 import { Knex } from "knex"
+import { CanonicalSchemaDefinition } from "./canonical-schema-definition"
 import { ModuleDefinition } from "../types/module-definition"
 import { toCamelCase } from "../utils/case.util"
 import { GenericEntityController } from "./generic-entity.controller"
@@ -44,6 +45,15 @@ export class GenericEntityFactory<T extends BaseEntity> {
         entityDefinition: EngineEntityDefinition,
         path?: string
     ): GenericEntityFactory<T> {
+        return new GenericEntityFactory<T>(knex, entityDefinition, path)
+    }
+
+    static fromCanonicalDefinition<T extends BaseEntity>(
+        knex: Knex,
+        definition: CanonicalSchemaDefinition,
+        path?: string
+    ): GenericEntityFactory<T> {
+        const entityDefinition = EngineEntityDefinitionAdapter.fromCanonicalDefinition(definition)
         return new GenericEntityFactory<T>(knex, entityDefinition, path)
     }
 }

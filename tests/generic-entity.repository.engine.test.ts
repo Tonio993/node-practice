@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import knex, { Knex } from 'knex'
 import { GenericEntityRepository } from '../src/shared/generic-entity/generic-entity.repository'
 import { EngineEntityDefinitionAdapter } from '../src/shared/generic-entity/engine-entity-definition'
+import { CanonicalSchemaDefinition } from '../src/shared/generic-entity/canonical-schema-definition'
 import { Column, Entity } from '../src/shared/generic-entity/generic-entity.decorator'
 import { SchemaConceptDefinition, SchemaRelationDefinition } from '../src/shared/generic-entity/schema-definition'
 
@@ -133,6 +134,73 @@ describe('generic entity repository engine integration', () => {
         name: 'audit_event_tenant_event_unique',
       },
     ])
+  })
+
+  it('projects canonical definitions into runtime engine buckets', () => {
+    const canonicalDefinitions: CanonicalSchemaDefinition[] = [
+      {
+        logicalName: 'Company',
+        tableName: 'company',
+        tableSchema: 'concept_configuration',
+        columns: [
+          { columnName: 'name', dataType: 'string', nullable: false },
+        ],
+        tableConstraints: [],
+        relations: [
+          {
+            relationType: 'oneToMany',
+            sourceEntity: 'company',
+            targetEntity: 'employee',
+            foreignKeyColumn: 'company_id',
+            sourceField: 'employees',
+            targetField: 'company',
+          },
+        ],
+      },
+      {
+        logicalName: 'Employee',
+        tableName: 'employee',
+        tableSchema: 'concept_configuration',
+        columns: [
+          { columnName: 'name', dataType: 'string', nullable: false },
+          { columnName: 'company_id', dataType: 'integer', nullable: true },
+        ],
+        tableConstraints: [],
+        relations: [
+          {
+            relationType: 'manyToOne',
+            sourceEntity: 'employee',
+            targetEntity: 'company',
+            foreignKeyColumn: 'company_id',
+            sourceField: 'company',
+            targetField: 'employees',
+          },
+        ],
+      },
+    ]
+
+    const runtimeDefinitions = EngineEntityDefinitionAdapter.fromCanonicalDefinitions(canonicalDefinitions)
+    const companyDefinition = runtimeDefinitions.find((definition) => definition.tableName === 'company')
+    const employeeDefinition = runtimeDefinitions.find((definition) => definition.tableName === 'employee')
+
+    expect(companyDefinition).toBeDefined()
+    expect(employeeDefinition).toBeDefined()
+
+    expect(companyDefinition!.relations.oneToMany).toHaveLength(1)
+    expect(companyDefinition!.relations.oneToMany[0]).toMatchObject({
+      propertyKey: 'employees',
+      targetTableName: 'employee',
+      foreignKey: 'company_id',
+      mappedBy: 'company',
+    })
+
+    expect(employeeDefinition!.relations.manyToOne).toHaveLength(1)
+    expect(employeeDefinition!.relations.manyToOne[0]).toMatchObject({
+      propertyKey: 'company',
+      targetTableName: 'company',
+      foreignKey: 'company_id',
+      mappedBy: 'employees',
+    })
   })
 })
 
