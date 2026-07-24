@@ -97,48 +97,6 @@ describe('schema management service', () => {
     await db.destroy()
   })
 
-  it('maps raw configuration rows into canonical schema definitions', async () => {
-    const conceptId = await db('concept').insert({
-      name: 'User',
-      table_name: 'user',
-      table_schema: 'concept_configuration',
-    })
-
-    await db('concept_field').insert({
-      id_concept: conceptId[0],
-      name: 'username',
-      type: 'string',
-      nullable: false,
-      unique: true,
-    })
-
-    await db('concept_relation').insert({
-      id_concept_source: conceptId[0],
-      id_concept_target: conceptId[0],
-      relation_type: 'manyToOne',
-      foreign_key: 'account_id',
-    })
-
-    const service = new SchemaManagementService(db)
-    const definitions = await (service as any).loadCanonicalDefinitionsFromConfiguration()
-
-    expect(definitions).toHaveLength(1)
-    expect(definitions[0].logicalName).toBe('User')
-    expect(definitions[0].tableName).toBe('user')
-    expect(definitions[0].columns[0]).toMatchObject({
-      columnName: 'username',
-      dataType: 'string',
-      nullable: false,
-      unique: true,
-    })
-    expect(definitions[0].relations[0]).toMatchObject({
-      relationType: 'manyToOne',
-      sourceEntity: 'user',
-      targetEntity: 'user',
-      foreignKeyColumn: 'account_id',
-    })
-  })
-
   it('creates a concrete table from concept configuration rows', async () => {
     const conceptId = await db('concept').insert({
       name: 'User',
@@ -861,5 +819,38 @@ describe('schema management service', () => {
     } finally {
       process.env.SCHEMA_SYNC_APPROVAL_TOKEN = originalToken
     }
+  })
+
+  it('uses unqualified references for sqlite clients', () => {
+    const service = new SchemaManagementService(db)
+    expect((service as any).buildReferenceName('concept_configuration', 'invoice_table')).toBe('invoice_table')
+  })
+
+  it('uses schema-qualified references and schema builder for non-sqlite clients', () => {
+    const withSchemaSentinel = {
+      hasTable: async () => false,
+      hasColumn: async () => false,
+    }
+
+    const fakeDb = {
+      client: {
+        config: {
+          client: 'pg',
+        },
+      },
+      schema: {
+        withSchema: (schemaName: string) => ({
+          ...withSchemaSentinel,
+          schemaName,
+        }),
+      },
+    } as unknown as Knex
+
+    const service = new SchemaManagementService(fakeDb)
+    expect((service as any).buildReferenceName('concept_configuration', 'invoice_table'))
+      .toBe('concept_configuration.invoice_table')
+
+    const schemaBuilder = (service as any).getSchemaBuilder('concept_configuration') as { schemaName: string }
+    expect(schemaBuilder.schemaName).toBe('concept_configuration')
   })
 })

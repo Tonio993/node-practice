@@ -361,7 +361,7 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - aggiunti test dedicati per dry-run e guardrail destructive in `tests/schema-management.service.test.ts`
 
 ### Step 10. Formalizzare i limiti sulle operazioni distruttive
-- stato: [IN CORSO]
+- stato: [COMPLETATO]
 - prima di introdurre `drop`, `rename` o alter distruttivi, definire policy esplicite:
   - quali operazioni sono automatiche
   - quali sono solo segnalate in diff
@@ -392,6 +392,7 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
     - se restano azioni destructive non allowlisted, si applicano le regole `signal`/`block`
 
 ### Step 11. Allineare i test per livelli di responsabilità
+- stato: [COMPLETATO]
 - separare i test in tre blocchi:
   - test degli adapter decorator -> canonico
   - test degli adapter configurazione -> canonico
@@ -402,6 +403,14 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - vincoli unique singoli e compositi
   - idempotenza della sync
   - compatibilità sqlite vs postgres per schema e reference
+- note implementative completate:
+  - separato il blocco adapter configurazione -> canonico in `tests/canonical-schema.configuration-adapter.test.ts`
+  - separato il blocco adapter decorator -> canonico in `tests/canonical-schema.decorator-adapter.test.ts`
+  - mantenuto `tests/schema-management.service.test.ts` focalizzato su motore DDL/canonical sync e policy operative
+  - estesi i test adapter decorator con copertura esplicita per `manyToOne`, `oneToMany`, `oneToOne` e normalizzazione vincoli unique compositi
+  - estesi i test adapter configurazione con copertura esplicita naming `camelCase`/`snake_case`, relazioni multiple e fallback `foreignKey`
+  - aggiunta copertura esplicita nel blocco service per compatibilità sqlite/postgres su schema/reference (`buildReferenceName`, `getSchemaBuilder`)
+  - validazione finale: suite completa `npm run test:run` passata (32 test)
 
 ### Step 12. Deprecare gradualmente il modello operativo precedente
 - una volta che il motore usa stabilmente il canonico:
