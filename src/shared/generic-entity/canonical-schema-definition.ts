@@ -65,6 +65,70 @@ function normalizeRelationType(value: string): CanonicalSchemaRelationType {
   return 'unknown'
 }
 
+function toOptionalTrimmedValue(value: string | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+
+  const trimmed = value.trim()
+  return trimmed ? trimmed : undefined
+}
+
+function normalizeRelation(
+  relation: CanonicalSchemaRelationDefinition,
+  fallbackSourceEntity: string
+): CanonicalSchemaRelationDefinition {
+  const sourceEntity = toSnakeCase(String(toOptionalTrimmedValue(relation.sourceEntity) ?? fallbackSourceEntity))
+  const targetEntity = toSnakeCase(String(toOptionalTrimmedValue(relation.targetEntity) ?? ''))
+  const fallbackForeignKey = `${targetEntity}_id`
+
+  return {
+    relationType: normalizeRelationType(relation.relationType),
+    sourceEntity,
+    targetEntity,
+    foreignKeyColumn: toSnakeCase(String(toOptionalTrimmedValue(relation.foreignKeyColumn) ?? fallbackForeignKey)),
+    mappedBy: toOptionalTrimmedValue(relation.mappedBy),
+    sourceField: toOptionalTrimmedValue(relation.sourceField),
+    targetField: toOptionalTrimmedValue(relation.targetField),
+  }
+}
+
+function normalizeDefinition(definition: CanonicalSchemaDefinition): CanonicalSchemaDefinition {
+  const tableName = toSnakeCase(String(definition.tableName))
+  const tableSchema = toOptionalTrimmedValue(definition.tableSchema)
+  const relationMap = new Map<string, CanonicalSchemaRelationDefinition>()
+
+  for (const relation of definition.relations) {
+    const normalizedRelation = normalizeRelation(relation, tableName)
+    const relationKey = [
+      normalizedRelation.relationType,
+      normalizedRelation.sourceEntity,
+      normalizedRelation.targetEntity,
+      normalizedRelation.foreignKeyColumn,
+      normalizedRelation.mappedBy ?? '',
+      normalizedRelation.sourceField ?? '',
+      normalizedRelation.targetField ?? '',
+    ].join('|')
+
+    relationMap.set(relationKey, normalizedRelation)
+  }
+
+  return {
+    logicalName: definition.logicalName,
+    tableName,
+    tableSchema,
+    columns: definition.columns.map((column) => ({
+      ...column,
+      columnName: toSnakeCase(String(column.columnName)),
+    })),
+    tableConstraints: definition.tableConstraints.map((constraint) => ({
+      ...constraint,
+      columns: constraint.columns.map((column) => toSnakeCase(String(column))),
+    })),
+    relations: [...relationMap.values()],
+  }
+}
+
 export function isCanonicalSchemaDefinitionArray(
   definitions: EngineEntityDefinition[] | CanonicalSchemaDefinition[]
 ): definitions is CanonicalSchemaDefinition[] {
@@ -77,6 +141,10 @@ export function isCanonicalSchemaDefinitionArray(
 }
 
 export class CanonicalSchemaDefinitionAdapter {
+  static normalizeDefinitions(definitions: CanonicalSchemaDefinition[]): CanonicalSchemaDefinition[] {
+    return definitions.map((definition) => normalizeDefinition(definition))
+  }
+
   static fromDecoratedEntity(entityClass: Function): CanonicalSchemaDefinition {
     if (!hasEntityMetadata(entityClass)) {
       throw new Error(`Entity class ${entityClass.name} is missing @Entity decorator`)
@@ -85,7 +153,7 @@ export class CanonicalSchemaDefinitionAdapter {
     const entityMetadata = getEntityMetadata(entityClass)
     const tableName = String(entityMetadata?.tableName ?? toSnakeCase(entityClass.name))
 
-    return {
+    return normalizeDefinition({
       logicalName: entityClass.name,
       tableName,
       tableSchema: entityMetadata?.tableSchema,
@@ -110,7 +178,7 @@ export class CanonicalSchemaDefinitionAdapter {
         ...this.fromDecoratorRelations(tableName, 'manyToOne', getManyToOneRelations(entityClass)),
         ...this.fromDecoratorRelations(tableName, 'oneToOne', getOneToOneRelations(entityClass)),
       ],
-    }
+    })
   }
 
   static fromDecoratedEntities(entityClasses: Function[]): CanonicalSchemaDefinition[] {
@@ -120,7 +188,7 @@ export class CanonicalSchemaDefinitionAdapter {
   static fromConcepts(concepts: SchemaConceptDefinition[]): CanonicalSchemaDefinition[] {
     const conceptsById = new Map<number, SchemaConceptDefinition>(concepts.map((concept) => [concept.id, concept]))
 
-    return concepts.map((concept) => ({
+    return this.normalizeDefinitions(concepts.map((concept) => ({
       logicalName: concept.name,
       tableName: concept.getResolvedTableName(),
       tableSchema: concept.getResolvedTableSchema(),
@@ -143,11 +211,11 @@ export class CanonicalSchemaDefinitionAdapter {
       relations: concept.relations
         .map((relation) => this.fromConceptRelation(concept, relation, conceptsById))
         .filter((relation): relation is CanonicalSchemaRelationDefinition => relation !== null),
-    }))
+    })))
   }
 
   static fromEngineDefinitions(definitions: EngineEntityDefinition[]): CanonicalSchemaDefinition[] {
-    return definitions.map((definition) => ({
+    return this.normalizeDefinitions(definitions.map((definition) => ({
       logicalName: definition.name,
       tableName: definition.tableName,
       tableSchema: definition.tableSchema,
@@ -172,7 +240,7 @@ export class CanonicalSchemaDefinitionAdapter {
         ...this.fromEngineRelations(definition.tableName, 'manyToOne', definition.relations.manyToOne),
         ...this.fromEngineRelations(definition.tableName, 'oneToOne', definition.relations.oneToOne),
       ],
-    }))
+    })))
   }
 
   private static fromDecoratorRelations(

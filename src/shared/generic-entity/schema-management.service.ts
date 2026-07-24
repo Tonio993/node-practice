@@ -24,8 +24,9 @@ export class SchemaManagementService {
     const canonicalDefinitions = isCanonicalSchemaDefinitionArray(definitions)
       ? definitions
       : CanonicalSchemaDefinitionAdapter.fromEngineDefinitions(definitions)
+    const normalizedDefinitions = CanonicalSchemaDefinitionAdapter.normalizeDefinitions(canonicalDefinitions)
 
-    const concepts = this.mapCanonicalDefinitionsToConceptDefinitions(canonicalDefinitions)
+    const concepts = this.mapCanonicalDefinitionsToConceptDefinitions(normalizedDefinitions)
     await this.applyConceptDefinitions(concepts)
   }
 
