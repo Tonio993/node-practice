@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import knex, { Knex } from 'knex'
 import {
+  SchemaSyncApprovalError,
   SchemaManagementService,
   SchemaSyncGuardError,
 } from '../src/shared/generic-entity/schema-management.service'
@@ -551,6 +552,7 @@ describe('schema management service', () => {
     const hasTable = await db.schema.hasTable('dry_run_table')
     expect(hasTable).toBe(false)
     expect(result.applied).toBe(false)
+    expect(result.destructivePolicy).toBe('signal')
     expect(result.report.missingTables).toContainEqual(expect.objectContaining({
       tableName: 'dry_run_table',
     }))
@@ -592,5 +594,272 @@ describe('schema management service', () => {
 
     const hasExternalCodeColumn = await db.schema.hasColumn('guarded_table', 'external_code')
     expect(hasExternalCodeColumn).toBe(false)
+  })
+
+  it('blocks sync when destructive policy is explicitly set to block', async () => {
+    await db.schema.createTable('policy_block_table', (table) => {
+      table.increments('id').notNullable()
+      table.integer('tenant_id').nullable()
+    })
+
+    const definitions: CanonicalSchemaDefinition[] = [
+      {
+        logicalName: 'PolicyBlock',
+        tableName: 'policy_block_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            columnName: 'tenant_id',
+            dataType: 'string',
+            nullable: false,
+          },
+          {
+            columnName: 'new_safe_column',
+            dataType: 'string',
+            nullable: true,
+          },
+        ],
+        tableConstraints: [],
+        relations: [],
+      },
+    ]
+
+    const service = new SchemaManagementService(db)
+    await expect(service.syncFromDefinitionsWithPlan(definitions, { destructivePolicy: 'block' }))
+      .rejects
+      .toBeInstanceOf(SchemaSyncGuardError)
+
+    const hasSafeColumn = await db.schema.hasColumn('policy_block_table', 'new_safe_column')
+    expect(hasSafeColumn).toBe(false)
+  })
+
+  it('keeps sync in report-only mode when destructive policy is signal and destructive diffs exist', async () => {
+    await db.schema.createTable('policy_signal_table', (table) => {
+      table.increments('id').notNullable()
+      table.integer('tenant_id').nullable()
+    })
+
+    const definitions: CanonicalSchemaDefinition[] = [
+      {
+        logicalName: 'PolicySignal',
+        tableName: 'policy_signal_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            columnName: 'tenant_id',
+            dataType: 'string',
+            nullable: false,
+          },
+          {
+            columnName: 'new_safe_column',
+            dataType: 'string',
+            nullable: true,
+          },
+        ],
+        tableConstraints: [],
+        relations: [],
+      },
+    ]
+
+    const service = new SchemaManagementService(db)
+    const result = await service.syncFromDefinitionsWithPlan(definitions, { destructivePolicy: 'signal' })
+
+    expect(result.applied).toBe(false)
+    expect(result.destructivePolicy).toBe('signal')
+    expect(result.report.plan.destructiveActions.length).toBeGreaterThan(0)
+
+    const hasSafeColumn = await db.schema.hasColumn('policy_signal_table', 'new_safe_column')
+    expect(hasSafeColumn).toBe(false)
+  })
+
+  it('applies safe actions when destructive policy is signal and no destructive diffs exist', async () => {
+    await db.schema.createTable('policy_signal_safe_table', (table) => {
+      table.increments('id').notNullable()
+    })
+
+    const definitions: CanonicalSchemaDefinition[] = [
+      {
+        logicalName: 'PolicySignalSafe',
+        tableName: 'policy_signal_safe_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            columnName: 'new_safe_column',
+            dataType: 'string',
+            nullable: true,
+          },
+        ],
+        tableConstraints: [],
+        relations: [],
+      },
+    ]
+
+    const service = new SchemaManagementService(db)
+    const result = await service.syncFromDefinitionsWithPlan(definitions, { destructivePolicy: 'signal' })
+
+    expect(result.applied).toBe(true)
+    expect(result.destructivePolicy).toBe('signal')
+    expect(result.report.plan.destructiveActions.length).toBe(0)
+    expect(result.report.plan.safeActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'addColumn',
+        tableName: 'policy_signal_safe_table',
+        target: 'new_safe_column',
+      }),
+    ]))
+  })
+
+  it('allows sync when destructive actions are fully allowlisted under block policy', async () => {
+    await db.schema.createTable('policy_allow_block_table', (table) => {
+      table.increments('id').notNullable()
+      table.integer('tenant_id').nullable()
+    })
+
+    const definitions: CanonicalSchemaDefinition[] = [
+      {
+        logicalName: 'PolicyAllowBlock',
+        tableName: 'policy_allow_block_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            columnName: 'tenant_id',
+            dataType: 'string',
+            nullable: false,
+          },
+        ],
+        tableConstraints: [],
+        relations: [],
+      },
+    ]
+
+    const service = new SchemaManagementService(db)
+    const result = await service.syncFromDefinitionsWithPlan(definitions, {
+      destructivePolicy: 'block',
+      allowDestructiveActions: ['alterColumnType', 'alterColumnNullability'],
+    })
+
+    expect(result.applied).toBe(true)
+    expect(result.blockedDestructiveActions).toHaveLength(0)
+    expect(result.report.plan.destructiveActions).toHaveLength(2)
+  })
+
+  it('keeps report-only when only part of destructive actions are allowlisted under signal policy', async () => {
+    await db.schema.createTable('policy_partial_signal_table', (table) => {
+      table.increments('id').notNullable()
+      table.integer('tenant_id').nullable()
+    })
+
+    const definitions: CanonicalSchemaDefinition[] = [
+      {
+        logicalName: 'PolicyPartialSignal',
+        tableName: 'policy_partial_signal_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            columnName: 'tenant_id',
+            dataType: 'string',
+            nullable: false,
+          },
+        ],
+        tableConstraints: [],
+        relations: [],
+      },
+    ]
+
+    const service = new SchemaManagementService(db)
+    const result = await service.syncFromDefinitionsWithPlan(definitions, {
+      destructivePolicy: 'signal',
+      allowDestructiveActions: ['alterColumnType'],
+    })
+
+    expect(result.applied).toBe(false)
+    expect(result.blockedDestructiveActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'alterColumnNullability',
+      }),
+    ]))
+  })
+
+  it('requires approval token when configured and destructive diffs are allowlisted', async () => {
+    await db.schema.createTable('policy_approval_required_table', (table) => {
+      table.increments('id').notNullable()
+      table.integer('tenant_id').nullable()
+    })
+
+    const definitions: CanonicalSchemaDefinition[] = [
+      {
+        logicalName: 'PolicyApprovalRequired',
+        tableName: 'policy_approval_required_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            columnName: 'tenant_id',
+            dataType: 'string',
+            nullable: false,
+          },
+        ],
+        tableConstraints: [],
+        relations: [],
+      },
+    ]
+
+    const originalToken = process.env.SCHEMA_SYNC_APPROVAL_TOKEN
+    process.env.SCHEMA_SYNC_APPROVAL_TOKEN = 'token-123'
+
+    try {
+      const service = new SchemaManagementService(db)
+      await expect(service.syncFromDefinitionsWithPlan(definitions, {
+        destructivePolicy: 'block',
+        allowDestructiveActions: ['alterColumnType', 'alterColumnNullability'],
+        requireApprovalToken: true,
+      }))
+        .rejects
+        .toBeInstanceOf(SchemaSyncApprovalError)
+    } finally {
+      process.env.SCHEMA_SYNC_APPROVAL_TOKEN = originalToken
+    }
+  })
+
+  it('accepts sync when approval token is valid and destructive diffs are allowlisted', async () => {
+    await db.schema.createTable('policy_approval_granted_table', (table) => {
+      table.increments('id').notNullable()
+      table.integer('tenant_id').nullable()
+    })
+
+    const definitions: CanonicalSchemaDefinition[] = [
+      {
+        logicalName: 'PolicyApprovalGranted',
+        tableName: 'policy_approval_granted_table',
+        tableSchema: 'concept_configuration',
+        columns: [
+          {
+            columnName: 'tenant_id',
+            dataType: 'string',
+            nullable: false,
+          },
+        ],
+        tableConstraints: [],
+        relations: [],
+      },
+    ]
+
+    const originalToken = process.env.SCHEMA_SYNC_APPROVAL_TOKEN
+    process.env.SCHEMA_SYNC_APPROVAL_TOKEN = 'token-456'
+
+    try {
+      const service = new SchemaManagementService(db)
+      const result = await service.syncFromDefinitionsWithPlan(definitions, {
+        destructivePolicy: 'block',
+        allowDestructiveActions: ['alterColumnType', 'alterColumnNullability'],
+        requireApprovalToken: true,
+        approvalToken: 'token-456',
+      })
+
+      expect(result.applied).toBe(true)
+      expect(result.blockedDestructiveActions).toHaveLength(0)
+      expect(result.report.plan.destructiveActions.length).toBeGreaterThan(0)
+    } finally {
+      process.env.SCHEMA_SYNC_APPROVAL_TOKEN = originalToken
+    }
   })
 })

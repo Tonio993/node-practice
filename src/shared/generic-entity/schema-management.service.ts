@@ -77,12 +77,20 @@ export interface SchemaDiffPlan {
 
 export interface SchemaSyncOptions {
   dryRun?: boolean
+  destructivePolicy?: SchemaDestructivePolicy
+  allowDestructiveActions?: SchemaDiffActionKind[]
+  requireApprovalToken?: boolean
+  approvalToken?: string
   failOnDestructive?: boolean
 }
+
+export type SchemaDestructivePolicy = 'signal' | 'block'
 
 export interface SchemaSyncExecutionResult {
   applied: boolean
   report: SchemaDiffReport
+  destructivePolicy: SchemaDestructivePolicy
+  blockedDestructiveActions: SchemaDiffPlannedAction[]
 }
 
 export class SchemaSyncGuardError extends Error {
@@ -92,8 +100,46 @@ export class SchemaSyncGuardError extends Error {
   }
 }
 
+export class SchemaSyncApprovalError extends Error {
+  constructor(public readonly report: SchemaDiffReport) {
+    super('Destructive schema changes require a valid approval token. Sync aborted by policy.')
+    this.name = 'SchemaSyncApprovalError'
+  }
+}
+
 export class SchemaManagementService {
   constructor(private readonly db: Knex) {}
+
+  private hasValidApprovalToken(options: SchemaSyncOptions): boolean {
+    const expectedToken = process.env.SCHEMA_SYNC_APPROVAL_TOKEN
+    const providedToken = options.approvalToken?.trim()
+    if (!expectedToken || !providedToken) {
+      return false
+    }
+
+    return providedToken === expectedToken
+  }
+
+  private getBlockedDestructiveActions(
+    destructiveActions: SchemaDiffPlannedAction[],
+    allowDestructiveActions: SchemaDiffActionKind[] | undefined
+  ): SchemaDiffPlannedAction[] {
+    if (!allowDestructiveActions?.length) {
+      return destructiveActions
+    }
+
+    const allowedKinds = new Set(allowDestructiveActions)
+    return destructiveActions.filter((action) => !allowedKinds.has(action.kind))
+  }
+
+  private resolveDestructivePolicy(options: SchemaSyncOptions): SchemaDestructivePolicy {
+    // Backward compatible path: explicit boolean option still wins if provided.
+    if (options.failOnDestructive !== undefined) {
+      return options.failOnDestructive ? 'block' : 'signal'
+    }
+
+    return options.destructivePolicy ?? 'signal'
+  }
 
   private createEmptyPlan(): SchemaDiffPlan {
     return {
@@ -266,9 +312,13 @@ export class SchemaManagementService {
     definitions: CanonicalSchemaDefinition[],
     options: SchemaSyncOptions = {}
   ): Promise<SchemaSyncExecutionResult> {
+    const destructivePolicy = this.resolveDestructivePolicy(options)
+
     if (definitions.length === 0) {
       return {
         applied: false,
+        destructivePolicy,
+        blockedDestructiveActions: [],
         report: {
           missingTables: [],
           missingColumns: [],
@@ -283,14 +333,34 @@ export class SchemaManagementService {
 
     const normalizedDefinitions = CanonicalSchemaDefinitionAdapter.normalizeDefinitions(definitions)
     const report = await this.compareDefinitions(normalizedDefinitions)
+    const blockedDestructiveActions = this.getBlockedDestructiveActions(
+      report.plan.destructiveActions,
+      options.allowDestructiveActions
+    )
 
-    if (options.failOnDestructive && report.plan.destructiveActions.length > 0) {
+    if (destructivePolicy === 'block' && blockedDestructiveActions.length > 0) {
       throw new SchemaSyncGuardError(report)
+    }
+
+    if (destructivePolicy === 'signal' && blockedDestructiveActions.length > 0) {
+      return {
+        applied: false,
+        destructivePolicy,
+        blockedDestructiveActions,
+        report,
+      }
+    }
+
+    const hasDestructiveDiffs = report.plan.destructiveActions.length > 0
+    if (options.requireApprovalToken && hasDestructiveDiffs && !this.hasValidApprovalToken(options)) {
+      throw new SchemaSyncApprovalError(report)
     }
 
     if (options.dryRun) {
       return {
         applied: false,
+        destructivePolicy,
+        blockedDestructiveActions,
         report,
       }
     }
@@ -298,6 +368,8 @@ export class SchemaManagementService {
     await this.applyCanonicalDefinitions(normalizedDefinitions)
     return {
       applied: true,
+      destructivePolicy,
+      blockedDestructiveActions,
       report,
     }
   }

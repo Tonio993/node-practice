@@ -361,11 +361,35 @@ Trasformare il layer attuale da semplice sincronizzazione SQL a un vero schema m
   - aggiunti test dedicati per dry-run e guardrail destructive in `tests/schema-management.service.test.ts`
 
 ### Step 10. Formalizzare i limiti sulle operazioni distruttive
+- stato: [IN CORSO]
 - prima di introdurre `drop`, `rename` o alter distruttivi, definire policy esplicite:
   - quali operazioni sono automatiche
   - quali sono solo segnalate in diff
   - quali richiedono conferma o migration esplicita
 - questo evita che il modello canonico venga interpretato come licenza a sincronizzare in modo distruttivo senza regole
+- strade possibili (con trade-off):
+  - strada A, conservativa (consigliata): default `signal`, in presenza di azioni destructive passa in report-only (nessuna applicazione parziale)
+  - strada B, protetta: `block` per interrompere la sync quando sono presenti azioni destructive
+  - strada C, change-management esplicito: introdurre un token/approvazione runtime per sbloccare selettivamente classi di azioni destructive
+- note implementative avviate:
+  - introdotta policy distruttiva esplicita in `SchemaSyncOptions`:
+    - `destructivePolicy: 'signal' | 'block'`
+  - mantenuta retrocompatibilità con `failOnDestructive` (legacy override)
+  - `SchemaSyncExecutionResult` ora espone la policy risolta (`destructivePolicy`)
+  - comportamento iniziale formalizzato:
+    - `signal`: report-only quando il piano contiene azioni destructive
+    - `block`: solleva `SchemaSyncGuardError` quando il piano contiene azioni destructive
+  - aggiunti test per i percorsi `signal` e `block` in `tests/schema-management.service.test.ts`
+  - avviata strada C con whitelist granulare delle azioni destructive:
+    - `allowDestructiveActions` in `SchemaSyncOptions`
+    - `blockedDestructiveActions` in `SchemaSyncExecutionResult`
+  - introdotta policy opzionale di approvazione esplicita:
+    - `requireApprovalToken` + `approvalToken` in `SchemaSyncOptions`
+    - confronto contro `SCHEMA_SYNC_APPROVAL_TOKEN` (environment)
+    - errore tipizzato `SchemaSyncApprovalError` in caso di token mancante/non valido
+  - comportamento attuale con whitelist:
+    - se tutte le azioni destructive sono allowlisted, la policy non blocca
+    - se restano azioni destructive non allowlisted, si applicano le regole `signal`/`block`
 
 ### Step 11. Allineare i test per livelli di responsabilità
 - separare i test in tre blocchi:
